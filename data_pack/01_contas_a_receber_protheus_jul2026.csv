@@ -1,0 +1,13 @@
+cliente;cnpj;unidade;documento;nosso_numero;tipo;emissao;vencimento;valor;status
+Padaria Vila Nova Ltda;12.345.678/0001-90;SP-Capital;NF 104521;000012345678;Produto;01/07/2026;10/07/2026;18.450,00;Aberto
+Padaria Vila Nova Ltda;12.345.678/0001-90;SP-Capital;NF 104522;000012345679;Royalty;01/07/2026;10/07/2026;3.200,00;Aberto
+Doce Ponto Comercio de Alimentos;98.765.432/0001-11;SP-Interior;NF 104533;000012345690;Produto;02/07/2026;12/07/2026;42.780,50;Aberto
+Casa do Pao Franqueado ME;45.111.222/0001-33;MG;NF 104540;000012345701;Produto;03/07/2026;13/07/2026;9.870,00;Aberto
+Rede Sabor & Cia Ltda;33.444.555/0001-77;RJ;NF 104551;000012345712;Produto;05/07/2026;15/07/2026;66.300,00;Aberto
+Rede Sabor & Cia Ltda;33.444.555/0001-77;RJ;NF 104552;000012345713;Royalty;05/07/2026;15/07/2026;7.100,00;Aberto
+Emporio Bela Vista Alimentos SA;22.333.444/0001-55;SP-Capital;NF 104560;000012345720;Produto;06/07/2026;16/07/2026;125.000,00;Aberto
+Cantinho Mineiro Franquias Ltda;77.888.999/0001-22;MG;NF 104571;000012345731;Servico;07/07/2026;17/07/2026;15.600,00;Aberto
+Grao Nobre Comercio Ltda;55.666.777/0001-44;SUL;NF 104580;000012345740;Produto;08/07/2026;20/07/2026;31.250,00;Aberto
+Doce Ponto Comercio de Alimentos;98.765.432/0001-11;SP-Interior;NF 104588;000012345748;Royalty;08/07/2026;20/07/2026;4.850,00;Aberto
+Sabor Express Delivery ME;11.222.333/0001-66;SP-Capital;NF 104595;000012345755;Produto;09/07/2026;21/07/2026;7.430,00;Aberto
+Padoca Central Ltda;66.777.888/0001-99;SP-Interior;NF 104601;000012345761;Produto;10/07/2026;22/07/2026;22.900,00;Aberto

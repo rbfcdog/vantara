@@ -1,0 +1,12 @@
+docs/
+.venv/
+.env
+__pycache__/
+*.py[cod]
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+frontend/*.tsbuildinfo
+deliverables/
+audio/

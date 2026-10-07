@@ -1,0 +1,65 @@
+========================================================================
+ARQUIVO 04 — AMOSTRA DA CAIXA DE ENTRADA DE CONTAS A PAGAR (pagar@vantara.com.br)
+Amostra de 3 itens de uma media de ~340 e-mails/mes. Formatos preservados.
+========================================================================
+
+--- E-MAIL 1 ---------------------------------------------------------
+De: financeiro@embalagenssaojorge.com.br
+Para: pagar@vantara.com.br
+Data: 06/07/2026 09:14
+Assunto: NF 88231 - Vantara
+
+Bom dia,
+
+Segue em anexo a NF 88231 referente ao pedido de embalagens (PC 4471).
+Valor: R$ 18.900,00 - vencimento 20/07.
+Dados bancarios: Banco 033 / ag 1234 / cc 56789-0
+Qualquer duvida estou a disposicao.
+
+Att,
+Marcia
+
+[anexo: NF88231.pdf]
+
+
+--- E-MAIL 2 ---------------------------------------------------------
+De: marcia.rocha@embalagenssaojorge.com.br
+Para: pagar@vantara.com.br; compras@vantara.com.br
+Data: 18/07/2026 16:52
+Assunto: RE: cobranca em aberto - Sao Jorge Embalagens
+
+Pessoal, nao identificamos o pagamento da nota abaixo. Reenvio o boleto
+atualizado com juros.
+
+Nota fiscal 088231 - emissao 06/07/2026
+Valor original R$ 18.900,00
+Valor atualizado R$ 19.278,00 (venc. 25/07/2026)
+Linha digitavel: 03399.87654 32100.123456 78901.234567 8 91230000019278
+
+Obs: o pedido PC 4471 foi entregue parcialmente (12 de 15 volumes), o
+restante sai na proxima semana.
+
+[anexo: boleto_88231_atualizado.pdf]
+
+
+--- E-MAIL 3 ---------------------------------------------------------
+De: contato@transportadoraroterapido.com.br
+Para: pagar@vantara.com.br
+Data: 09/07/2026 07:41
+Assunto: Faturas semana 27
+
+Segue planilha com as 46 CT-e da semana. Total R$ 34.117,82.
+Vencimento 5 dias apos o recebimento conforme contrato.
+Favor confirmar recebimento.
+
+[anexo: fretes_sem27.xlsx]
+
+
+--- TRECHO DO GRUPO DE WHATSAPP "APROVACOES FIN" ----------------------
+[06/07 11:02] Compras - Rafael: pessoal, NF 88231 Sao Jorge, 18.900, ok pra pagar?
+[06/07 11:40] Controladoria - Bia: entrou o material completo?
+[06/07 14:18] Compras - Rafael: acho que sim, o Joao confirmou
+[06/07 14:19] Controladoria - Bia: ok, aprovado
+[19/07 08:33] Fin - Camila: gente a Sao Jorge cobrando de novo a 88231, ja pagamos?
+[19/07 08:35] Fin - Camila: achei, pagou dia 20. era outra nota entao?
+[19/07 09:02] Controladoria - Bia: nao sei, alguem confere?

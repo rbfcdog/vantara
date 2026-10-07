@@ -1,0 +1,34 @@
+services:
+  vantara:
+    image: floci/floci:2.2.0
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      FLOCI_HOSTNAME: vantara
+      FLOCI_STORAGE_MODE: persistent
+      FLOCI_STORAGE_PERSISTENT_PATH: /app/data
+    volumes:
+      - vantara-data:/app/data
+    networks:
+      - vantara
+
+  barte:
+    image: floci/floci:2.2.0
+    ports:
+      - "127.0.0.1:4567:4566"
+    environment:
+      FLOCI_HOSTNAME: barte
+      FLOCI_STORAGE_MODE: persistent
+      FLOCI_STORAGE_PERSISTENT_PATH: /app/data
+    volumes:
+      - barte-data:/app/data
+    networks:
+      - barte
+
+networks:
+  vantara:
+  barte:
+
+volumes:
+  vantara-data:
+  barte-data:
