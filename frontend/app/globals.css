@@ -234,11 +234,7 @@ a { color: inherit; }
 .analysis-answer { padding: 12px; background: #eef5f9; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink) !important; }
 .proof-edit { display: grid; gap: 10px; margin-top: 15px; }
 .proof-edit button { justify-self: start; }
-.assistant-panel { margin: 8px 0 32px; grid-template-columns: minmax(230px, .45fr) minmax(0, 1fr); box-shadow: none; }
-.assistant-intro, .assistant-console { padding: 28px; }
 .assistant-intro h2 { max-width: 260px; margin: 17px 0 10px; font-size: 27px; line-height: 1.13; letter-spacing: -.04em; }
-.assistant-intro > p:not(.eyebrow) { margin-bottom: 24px; font-size: 12px; }
-.assistant-sources { padding-top: 15px; }
 @media (max-width: 1050px) {
   .desk { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
   .panel-top, .detail-content { padding-left: 19px; padding-right: 19px; }
