@@ -1,14 +1,18 @@
 import base64
 import csv
+import os
+import sqlite3
+import tempfile
 import unittest
 from datetime import datetime
 from io import StringIO
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from botocore.exceptions import ClientError
 from fastapi.testclient import TestClient
 
 from vantara.api import app
+from vantara.agent import draft_request
 from vantara.sources import BUCKET, DATA, INBOX_KEY, SOURCE_FILES, Sources
 
 
@@ -40,6 +44,11 @@ class FakeS3:
 class AnalystApiTest(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        database = patch.dict(os.environ, {"VANTARA_WORKFLOW_DB": f"{temporary.name}/workflow.sqlite3"})
+        database.start()
+        self.addCleanup(database.stop)
         self.sources = patch("vantara.api._sources", return_value=Exports())
         self.sources.start()
         self.addCleanup(self.sources.stop)
@@ -170,6 +179,131 @@ class AnalystApiTest(unittest.TestCase):
             response = self.client.get("/api/worklist")
         self.assertEqual(response.status_code, 503)
         self.assertIn("seed", response.json()["detail"])
+
+    def test_workflow_baseline_and_history_survive_new_clients(self):
+        initial = self.client.get("/api/workflow")
+        self.assertEqual(initial.status_code, 200)
+        body = initial.json()
+        self.assertEqual(len(body["dataset"]), 64)
+        self.assertEqual(set(body["cases"]),
+                         {f"{item['origem']}:{item['linha']}" for item in self.client.get("/api/worklist").json()["items"]})
+        self.assertEqual(len(body["cases"]), 30)
+        baseline = body["cases"]["protheus:8"]
+        self.assertEqual({key: baseline[key] for key in ("source", "line", "status", "owner", "note", "version")},
+                         {"source": "protheus", "line": 8, "status": "open", "owner": "", "note": "", "version": 0})
+        self.assert_timestamp(baseline["opened_at"])
+        self.assert_timestamp(baseline["updated_at"])
+        self.assertEqual(baseline["history"], [{"status": "open", "owner": "", "note": "",
+                                                "at": baseline["opened_at"]}])
+        steps = [("open", "Ana", "", 0), ("inconclusive", "Ana", "Falta comprovante", 1),
+                 ("closed", "Ana", "Referência conferida manualmente", 2),
+                 ("open", "Bruno", "Revisão solicitada", 3)]
+        for status, owner, note, version in steps:
+            result = TestClient(app).patch("/api/workflow", params={"source": "protheus", "line": 8},
+                                           json={"status": status, "owner": owner, "note": note, "version": version})
+            self.assertEqual(result.status_code, 200, result.text)
+            current = result.json()
+            self.assertEqual((current["status"], current["owner"], current["note"], current["version"]),
+                             (status, owner, note, version + 1))
+            self.assertEqual(current["opened_at"], baseline["opened_at"])
+            self.assert_timestamp(current["updated_at"])
+            self.assertEqual(current["history"][-1], {"status": status, "owner": owner, "note": note,
+                                                       "at": current["updated_at"]})
+        stored = TestClient(app).get("/api/workflow").json()["cases"]["protheus:8"]
+        self.assertEqual(stored, current)
+        self.assertEqual(len(stored["history"]), 5)
+
+    def test_workflow_rejects_conflicts_invalid_decisions_and_noncurrent_cases(self):
+        params = {"source": "bank", "line": 17}
+        update = {"status": "closed", "owner": "Equipe AR", "note": "Conferido por humano", "version": 0}
+        self.assertEqual(self.client.patch("/api/workflow", params=params,
+                                           json={**update, "note": "  "}).status_code, 422)
+        self.assertEqual(self.client.patch("/api/workflow", params=params,
+                                           json={**update, "status": "inconclusive", "note": ""}).status_code, 422)
+        bad_status = self.client.patch("/api/workflow", params=params,
+                                       json={**update, "status": "paid"})
+        self.assertEqual(bad_status.status_code, 422)
+        self.assertIsInstance(bad_status.json()["detail"], str)
+        self.assertEqual(self.client.patch("/api/workflow", params=params, json=update).status_code, 200)
+        stale = TestClient(app).patch("/api/workflow", params=params, json=update)
+        self.assertEqual(stale.status_code, 409)
+        self.assertIsInstance(stale.json()["detail"], str)
+        invalid = self.client.patch("/api/workflow", params=params,
+                                    json={**update, "status": "inconclusive", "version": 1})
+        self.assertEqual(invalid.status_code, 422)
+        self.assertEqual(self.client.patch("/api/workflow", params=params,
+                                           json={**update, "version": 1}).status_code, 422)
+        self.assertEqual(self.client.patch("/api/workflow", params=params,
+                                           json={**update, "status": "open", "note": "", "version": 1}).status_code, 422)
+        self.assertEqual(self.client.get("/api/workflow").json()["cases"]["bank:17"]["version"], 1)
+        missing = self.client.patch("/api/workflow", params={"source": "bank", "line": 8}, json=update)
+        self.assertEqual(missing.status_code, 404)
+        self.assertIsInstance(missing.json()["detail"], str)
+
+    def test_workflow_dataset_isolated_by_each_export_byte_and_current_worklist(self):
+        before = self.client.get("/api/workflow").json()
+        self.client.patch("/api/workflow", params={"source": "protheus", "line": 8},
+                          json={"status": "closed", "owner": "Ana", "note": "Verificado", "version": 0})
+        for name in SOURCE_FILES:
+            changed = Exports()
+            changed.data[name] += b"\n"
+            with patch("vantara.api._sources", return_value=changed):
+                isolated = TestClient(app).get("/api/workflow").json()
+                self.assertNotEqual(before["dataset"], isolated["dataset"])
+                self.assertEqual(isolated["cases"]["protheus:8"]["version"], 0)
+                self.assertEqual(isolated["cases"]["protheus:8"]["status"], "open")
+                self.assertEqual(isolated["cases"]["protheus:8"]["opened_at"], isolated["cases"]["protheus:8"]["history"][0]["at"])
+        restored = TestClient(app).get("/api/workflow").json()
+        self.assertEqual(before["dataset"], restored["dataset"])
+        self.assertEqual(restored["cases"]["protheus:8"]["version"], 1)
+        empty = Exports()
+        for name in SOURCE_FILES:
+            empty.data[name] = b"" if name == INBOX_KEY else empty.data[name].splitlines(keepends=True)[0]
+        with patch("vantara.api._sources", return_value=empty):
+            self.assertEqual(TestClient(app).get("/api/workflow").json()["cases"], {})
+            self.assertEqual(TestClient(app).patch("/api/workflow", params={"source": "protheus", "line": 8},
+                                                  json={"status": "open", "owner": "", "note": "", "version": 0}).status_code, 404)
+
+    def test_workflow_storage_failure_is_not_an_empty_queue(self):
+        with patch("vantara.api.list_cases", side_effect=sqlite3.OperationalError("disk unavailable")):
+            response = self.client.get("/api/workflow")
+        self.assertEqual(response.status_code, 503)
+        self.assertIsInstance(response.json()["detail"], str)
+        self.assertNotIn("cases", response.json())
+
+    def test_draft_only_eligible_and_no_send(self):
+        with patch("vantara.api.draft_request", return_value="Por favor, envie a referência do crédito.") as draft:
+            bank = self.client.post("/api/workflow/draft", json={"source": "bank", "line": 17})
+            self.assertEqual(bank.status_code, 200)
+            self.assertEqual(bank.json(), {"draft": "Por favor, envie a referência do crédito."})
+            self.assertEqual(draft.call_args.args[0],
+                             {"credit": {"date": "2026-07-29", "amount_brl": "3400.00"}})
+            title = self.client.post("/api/workflow/draft", json={"source": "protheus", "line": 8})
+            self.assertEqual(title.status_code, 200)
+            self.assertEqual(draft.call_args.args[0],
+                             {"credits": [{"date": "2026-07-29", "amount_brl": "3400.00"}]})
+            self.assertEqual(self.client.post("/api/workflow/draft", json={"source": "bank", "line": 8}).status_code, 404)
+            self.assertEqual(self.client.post("/api/workflow/draft", json={"source": "protheus", "line": 900}).status_code, 404)
+            self.assertEqual(self.client.post("/api/workflow/draft", json={"source": "bank", "line": 7}).status_code, 422)
+            self.assertEqual(draft.call_count, 2)
+        with patch("vantara.api.draft_request", side_effect=RuntimeError("Modelo não retornou um rascunho completo.")):
+            failure = self.client.post("/api/workflow/draft", json={"source": "bank", "line": 17})
+        self.assertEqual(failure.status_code, 503)
+        self.assertIsInstance(failure.json()["detail"], str)
+
+    def test_draft_model_receives_only_unsent_evidence_and_rejects_incomplete_output(self):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test"}), patch("vantara.agent.OpenAI") as client:
+            client.return_value.responses.create.return_value = Mock(status="completed", output_text="Envie a referência, por favor.")
+            self.assertEqual(draft_request({"bank": {"line": 17}}), "Envie a referência, por favor.")
+            request = client.return_value.responses.create.call_args.kwargs
+            self.assertEqual(request["input"], '{"bank": {"line": 17}}')
+            self.assertFalse(request["store"])
+            self.assertEqual(request["tools"], [])
+            self.assertIn("NÃO ENVIADO", request["instructions"])
+            self.assertIn("Não afirme pagamento", request["instructions"])
+            client.return_value.responses.create.return_value = Mock(status="incomplete", output_text="Texto parcial")
+            with self.assertRaises(RuntimeError):
+                draft_request({"bank": {"line": 17}})
 
     def test_ask_passes_validated_history_and_rejects_unpaired_messages(self):
         history = [

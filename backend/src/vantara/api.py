@@ -1,6 +1,7 @@
 import base64
 import binascii
 import csv
+import sqlite3
 from datetime import datetime, timezone
 from io import StringIO
 from typing import Literal
@@ -8,13 +9,16 @@ from typing import Literal
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError, EndpointConnectionError
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import JSONResponse, Response
 from openai import APIError, AuthenticationError
 from pydantic import BaseModel, Field
 
-from .agent import run
+from .agent import draft_request, run
 from .reconcile import reconcile, title_case, worklist
 from .sources import BUCKET, SOURCE_FILES, Sources
+from .workflow import dataset_id, list_cases, update_case
 
 
 app = FastAPI(title="Vantara analyst API")
@@ -34,6 +38,18 @@ class ExportRequest(BaseModel):
     files: dict[str, str]
 
 
+class WorkflowUpdate(BaseModel):
+    owner: str = Field(max_length=120)
+    status: Literal["open", "inconclusive", "closed"]
+    note: str = Field(max_length=4000)
+    version: int = Field(ge=0)
+
+
+class DraftRequest(BaseModel):
+    source: Literal["protheus", "omie", "bank"]
+    line: int = Field(ge=2)
+
+
 class UploadedSources(Sources):
     def __init__(self, files: dict[str, bytes]):
         self.files = files
@@ -46,6 +62,29 @@ def _sources():
     s3 = boto3.client("s3", endpoint_url="http://127.0.0.1:4566", region_name="us-east-1",
                       aws_access_key_id="test", aws_secret_access_key="test")
     return Sources(s3)
+
+
+
+def _current_workflow():
+    source = _sources()
+    files = {filename: source._read(filename) for filename in SOURCE_FILES}
+    report = reconcile(UploadedSources(files))
+    header, *rows = worklist(report)
+    indices = {column: header.index(column) for column in ("origem", "linha")}
+    identities = {(row[indices["origem"]], int(row[indices["linha"]])) for row in rows}
+    return dataset_id(files), identities, report
+
+@app.exception_handler(RequestValidationError)
+async def invalid_request(request, exc):
+    if request.url.path not in {"/api/workflow", "/api/workflow/draft"}:
+        return await request_validation_exception_handler(request, exc)
+    detail = "; ".join(f"{'.'.join(map(str, error['loc']))}: {error['msg']}" for error in exc.errors())
+    return JSONResponse(status_code=422, content={"detail": detail})
+
+
+@app.exception_handler(sqlite3.Error)
+def workflow_storage_error(request, exc):
+    return JSONResponse(status_code=503, content={"detail": "Falha ao acessar o armazenamento local dos casos."})
 
 
 @app.exception_handler(FileNotFoundError)
@@ -88,6 +127,50 @@ def analysis_error(request, exc):
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
+
+
+@app.get("/api/workflow")
+def get_workflow():
+    dataset, identities, _ = _current_workflow()
+    return {"dataset": dataset, "cases": list_cases(dataset, identities)}
+
+
+@app.patch("/api/workflow")
+def patch_workflow(payload: WorkflowUpdate, source: Literal["protheus", "omie", "bank"],
+                   line: int = Query(ge=2)):
+    dataset, identities, _ = _current_workflow()
+    if (source, line) not in identities:
+        raise HTTPException(status_code=404, detail=f"Caso {source}:{line} ausente da lista de trabalho atual.")
+    owner, note = payload.owner.strip(), payload.note.strip()
+    if payload.status in ("closed", "inconclusive") and not note:
+        raise HTTPException(status_code=422, detail="Fechamento ou inconclusão exige uma nota humana.")
+    updated = update_case(dataset, source, line, payload.status, owner, note, payload.version)
+    if updated is None:
+        raise HTTPException(status_code=409, detail="Caso modificado por outra pessoa. Recarregue antes de salvar.")
+    return updated
+
+
+@app.post("/api/workflow/draft")
+def post_workflow_draft(payload: DraftRequest):
+    _, identities, report = _current_workflow()
+    if (payload.source, payload.line) not in identities:
+        raise HTTPException(status_code=404, detail=f"Caso {payload.source}:{payload.line} ausente da lista de trabalho atual.")
+    if payload.source == "bank":
+        bank = next(item for item in report["bank"] if item["line"] == payload.line)
+        if bank["status"] != "credito_sem_vinculo_confirmado":
+            raise HTTPException(status_code=422, detail="Rascunho disponível apenas para crédito sem vínculo confirmado.")
+        evidence = {"credit": {"date": bank["date"], "amount_brl": bank["amount"]}}
+    else:
+        title = next(item for item in report["titles"] if item["source"] == payload.source and item["line"] == payload.line)
+        if not title["candidate_bank_credits"]:
+            raise HTTPException(status_code=422, detail="Rascunho disponível apenas para título com crédito candidato não atribuído.")
+        bank_by_line = {item["line"]: item for item in report["bank"]}
+        evidence = {"credits": [
+            {"date": bank_by_line[candidate["line"]]["date"],
+             "amount_brl": bank_by_line[candidate["line"]]["amount"]}
+            for candidate in title["candidate_bank_credits"]
+        ]}
+    return {"draft": draft_request(evidence)}
 
 
 @app.get("/api/worklist")

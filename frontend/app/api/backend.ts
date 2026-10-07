@@ -1,6 +1,6 @@
 const backendUrl = process.env.BACKEND_URL || "http://127.0.0.1:8000";
 
-type BackendPath = "/api/worklist" | "/api/worklist.csv" | "/api/case" | "/api/ask" | "/api/exports";
+type BackendPath = "/api/worklist" | "/api/worklist.csv" | "/api/case" | "/api/ask" | "/api/exports" | "/api/workflow" | "/api/workflow/draft";
 
 export function backendTarget(path: BackendPath) {
   const url = new URL(path, backendUrl);
@@ -11,7 +11,7 @@ export async function backendRequest(path: BackendPath, options?: RequestInit & 
   const url = new URL(path, backendUrl);
   const { searchParams, ...init } = options ?? {};
   if (searchParams) url.search = searchParams.toString();
-  return fetch(url, { ...init, cache: "no-store", signal: AbortSignal.timeout(path === "/api/ask" || path === "/api/exports" ? 120000 : 30000) });
+  return fetch(url, { ...init, cache: "no-store", signal: AbortSignal.timeout(path === "/api/ask" || path === "/api/exports" || path === "/api/workflow/draft" ? 120000 : 30000) });
 }
 
 export async function backendResponse(response: Response) {

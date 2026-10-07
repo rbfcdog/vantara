@@ -12,6 +12,26 @@ from .tools import TOOLS, execute
 MAX_CALLS = 8
 
 
+def draft_request(evidence: dict, model: str = "gpt-6-luna") -> str:
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise RuntimeError("Defina OPENAI_API_KEY antes de gerar o rascunho.")
+    response = OpenAI().responses.create(
+        model=model,
+        instructions=("Escreva em português somente um rascunho NÃO ENVIADO de solicitação de "
+                      "comprovante ou referência para esclarecer crédito sem vínculo. Use somente "
+                      "data e valor fornecidos; não cite nomes, CNPJ, notas, faturas ou pistas internas. "
+                      "Não afirme pagamento, quitação, baixa ou saldo e não solicite nem execute "
+                      "pagamento. Não diga que a mensagem foi enviada. Responda apenas com o texto "
+                      "da solicitação."),
+        input=json.dumps(evidence, ensure_ascii=False),
+        tools=[],
+        store=False,
+    )
+    if response.status != "completed" or not response.output_text or not response.output_text.strip():
+        raise RuntimeError("Modelo não retornou um rascunho completo.")
+    return response.output_text.strip()
+
+
 def run(question: str, sources: Sources, model: str = "gpt-6-luna", include_dossier: bool = True,
         history: list[dict[str, str]] | None = None) -> str:
     if not question.strip() or len(question) > 1000:
