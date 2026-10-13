@@ -18,32 +18,28 @@ type PayablesCase = {
   next_query: string;
   recommendation: string;
 };
-type CreditSuggestion = {
-  bank: { id: string; line: number; date: string; history: string; document: string; amount: string };
-  candidates: { id: string; documento: string; cliente: string; valor: string; vencimento: string; reasons: string[] }[];
-  next_action: string;
-  verdict?: "candidato_mais_provavel" | "sem_atribuicao";
-  candidate?: string | null;
-  rationale?: string;
-  evidence?: string[];
-  confirm_with?: string;
-};
-type AppliedWriteoff = {
-  event_line: number;
-  document: string;
+type CreditReview = {
+  line: number;
+  date: string;
+  history: string;
   amount: string;
-  kind: string;
-  balance_after: string;
-  receipt: string;
-  evidence: string[];
-  rationale: string;
-};
-type AutonomousExecution = {
-  mode: string;
-  status: string;
-  erp_writeoffs_performed: number;
-  applied: AppliedWriteoff[];
-  pending: { bank_line: number; reason: string; next_query: string }[];
+  document: string;
+  status: "vinculado_por_referencia" | "baixa_aplicada" | "retida" | "sem_atribuicao";
+  reviewed_by_ai: boolean;
+  origin?: "referencia" | "ia";
+  title?: { source: string; line: number; document: string; customer: string; amount: string; settlement: string };
+  evidence?: string[];
+  title_document?: string;
+  applied_kind?: string;
+  balance_after?: string;
+  receipt?: string;
+  rationale?: string;
+  reason?: string;
+  next_query?: string;
+  verdict?: "candidato_mais_provavel" | "sem_atribuicao" | null;
+  candidate?: string | null;
+  confirm_with?: string;
+  candidates?: { id: string; documento: string; cliente: string; valor: string; vencimento: string; reasons: string[] }[];
 };
 type CaseState = {
   source: string;
@@ -63,8 +59,7 @@ type Closing = {
   };
   items: WorkItem[];
   payables_review: { status: string; cases: PayablesCase[] } | null;
-  receivables_suggestions: { status: string; suggestions: CreditSuggestion[] } | null;
-  autonomous_execution: AutonomousExecution | null;
+  credits_review: CreditReview[] | null;
 };
 type Load = { state: "loading" } | { state: "error"; message: string } | { state: "ready"; data: Closing };
 
@@ -137,12 +132,12 @@ export default function Home() {
   const [report, setReport] = useState<Load>({ state: "loading" });
   const [cases, setCases] = useState<Record<string, CaseState>>({});
   const [retry, setRetry] = useState(0);
-
+  const [page, setPage] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
     setReport({ state: "loading" });
     Promise.all([
-      fetch("/api/worklist", { cache: "no-store", signal: controller.signal }).then((response) => json<{ processed_at: string; summary: Closing["summary"]; items: WorkItem[]; payables_review: Closing["payables_review"]; receivables_suggestions: Closing["receivables_suggestions"]; autonomous_execution: Closing["autonomous_execution"]; dataset: string }>(response)),
+      fetch("/api/worklist", { cache: "no-store", signal: controller.signal }).then((response) => json<{ processed_at: string; summary: Closing["summary"]; items: WorkItem[]; payables_review: Closing["payables_review"]; credits_review: CreditReview[]; dataset: string }>(response)),
       fetch("/api/workflow", { cache: "no-store", signal: controller.signal }).then((response) => json<{ dataset: string; cases: Record<string, CaseState> }>(response)),
     ]).then(([closing, workflow]) => {
       if (!closing?.summary?.coverage || !closing.summary.receivables ||
@@ -162,9 +157,14 @@ export default function Home() {
                    ...payableCases.map((item) => `bank:${item.bank_entries[0]?.line}`)]
     .filter((id) => cases[id]?.status === "open").length;
   const done = duplicates.length + payableCases.length - pending;
-  const suggestions = data?.receivables_suggestions?.suggestions ?? [];
-  const appliedByLine = new Map((data?.autonomous_execution?.applied ?? []).map((row) => [row.event_line, row]));
-  const appliedCount = appliedByLine.size;
+  const credits = data?.credits_review ?? [];
+  const byStatus = (status: CreditReview["status"]) => credits.filter((credit) => credit.status === status).length;
+  const appliedCount = byStatus("baixa_aplicada");
+  const pages = Math.max(1, Math.ceil(credits.length / 10));
+  const safePage = Math.min(page, pages - 1);
+  const shown = credits.slice(safePage * 10, safePage * 10 + 10);
+  const settlement = (value: string) => value === "credito_integral_no_extrato" ? "crédito integral ao título"
+    : value === "credito_parcial" ? "crédito parcial ao título" : value === "credito_excedente" ? "crédito excedente ao título" : value;
 
   return <main className="workspace">
     <header className="topbar"><span className="brand">VANTARA</span><span className="topbar-label">Financeiro</span></header>
@@ -174,7 +174,7 @@ export default function Home() {
     {report.state === "error" && <section className="state" role="alert"><h2>Publicação indisponível</h2><p>{report.message}</p><button type="button" onClick={() => setRetry((value) => value + 1)}>Tentar novamente</button><p>Nenhuma conciliação publicada ainda; ela aparece aqui assim que os exports chegarem.</p></section>}
 
     {data && <>
-      <section className="coverage" aria-label="Cobertura da conciliação"><dl><div><dt>Contas recebidas</dt><dd>{data.summary.coverage.bank_accounts_supplied} / {data.summary.coverage.bank_accounts_in_case}</dd></div><div><dt>Créditos sem vínculo</dt><dd>{data.summary.receivables.unlinked_credits}</dd></div><div><dt>Baixas aplicadas pelo executor</dt><dd>{appliedCount}</dd></div><div><dt>Baixas no ERP</dt><dd>{data.summary.erp_writeoffs_performed}</dd></div></dl><p>{data.summary.coverage.bank_accounts_in_case - data.summary.coverage.bank_accounts_supplied} contas ainda sem extrato; a conciliação atualiza assim que chegam.</p></section>
+      <section className="coverage" aria-label="Cobertura da conciliação"><dl><div><dt>Baixas no ERP</dt><dd>{appliedCount}</dd></div></dl></section>
 
       <section className="reviews" aria-labelledby="reviews-title"><div className="section-heading"><h2 id="reviews-title">Decisões pendentes</h2><span>{pending} {pending === 1 ? "pendente" : "pendentes"}{done > 0 ? ` · ${done} ${done === 1 ? "resolvida" : "resolvidas"}` : ""}</span></div>
         {duplicates.map((item) => {
@@ -187,29 +187,48 @@ export default function Home() {
         })}
         {duplicates.length + payableCases.length === 0 && <p className="empty">Nenhuma exceção aguardando decisão.</p>}
       </section>
-      {suggestions.length > 0 && <section className="reviews" aria-labelledby="credits-title"><div className="section-heading"><h2 id="credits-title">Créditos sem vínculo</h2><span>{suggestions.length} analisados pela IA · {appliedCount} baixas aplicadas · {suggestions.length - appliedCount} retidas</span></div>
-        {suggestions.map((item) => {
-          const applied = appliedByLine.get(item.bank.line) ?? null;
-          const candidate = item.verdict === "candidato_mais_provavel" ? item.candidates.find((entry) => entry.id === item.candidate) ?? null : null;
-          return <details className="credit" key={item.bank.line}><summary><span className="credit-row"><span>{item.bank.history}</span><strong>{currency.format(Number(item.bank.amount))}</strong></span>{applied ? <span className="chip chip-done">Baixa aplicada</span> : item.verdict && <span className={`chip ${item.verdict === "candidato_mais_provavel" ? "chip-warn" : "chip-open"}`}>{item.verdict === "candidato_mais_provavel" ? "Retida pela validação" : "Sem atribuição"}</span>}</summary>
+      {credits.length > 0 && <section className="reviews" aria-labelledby="credits-title"><div className="section-heading"><h2 id="credits-title">Créditos do extrato</h2><span>{credits.filter((credit) => credit.reviewed_by_ai).length} de {credits.length} revisados pela IA · {appliedCount} baixas aplicadas · {byStatus("retida")} {byStatus("retida") === 1 ? "retida" : "retidas"}</span></div>
+        {shown.map((item) => {
+          const candidate = item.candidate ? item.candidates?.find((entry) => entry.id === item.candidate) ?? null : null;
+          const chip = item.status === "baixa_aplicada" ? <span className="chip chip-done">Baixa aplicada</span>
+            : item.status === "vinculado_por_referencia" ? <span className="chip chip-link">Vínculo por referência</span>
+            : item.status === "retida" ? <span className="chip chip-warn">Retida pela validação</span>
+            : <span className="chip chip-open">Sem atribuição</span>;
+          return <details className="credit" key={item.line}><summary><span className="credit-row"><span>{item.history}</span><strong>{currency.format(Number(item.amount))}</strong></span>{chip}</summary>
           <div className="detail-body">
-            {applied ? <>
-              <p>Atribuída a <strong>{applied.document}</strong> pela decisão da IA; baixa {applied.kind === "total" ? "total" : "parcial"} de {currency.format(Number(applied.amount))} registrada no executor, saldo {currency.format(Number(applied.balance_after))}.</p>
-              <p>{applied.rationale}</p>
-              <References values={applied.evidence} />
-              <p>Recibo: <code>{applied.receipt}</code></p>
-            </> : item.verdict ? <>
+            {item.status === "vinculado_por_referencia" && item.title && <>
+              <p>Vinculado por referência exata: o documento <code>{item.document || "—"}</code> do extrato confere com a referência única do título <strong>{item.title.document} · {item.title.customer} · R$ {item.title.amount}</strong> ({item.title.source}); {settlement(item.title.settlement)}.</p>
+              <References values={item.evidence ?? []} />
+            </>}
+            {item.status === "baixa_aplicada" && <>
+              {item.origin === "referencia" && item.title && <p>Referência exata <code>{item.document}</code> confere com o título <strong>{item.title.document} · {item.title.customer}</strong> ({item.title.source}); {settlement(item.title.settlement)}. A IA revisou este vínculo, sem poder alterar a referência documental.</p>}
+              <p>{item.origin === "referencia" ? "Baixa após revisão da IA" : "Atribuída pela decisão da IA"} a <strong>{item.title_document}</strong>; baixa {item.applied_kind === "total" ? "total" : "parcial"} de {currency.format(Number(item.amount))} registrada no executor, saldo {currency.format(Number(item.balance_after ?? "0"))}.</p>
+              <p>{item.rationale}</p>
+              <References values={item.evidence ?? []} />
+              <p>Recibo: <code>{item.receipt}</code></p>
+            </>}
+            {item.status === "retida" && <>
+              {candidate && <p>Título apontado: <strong>{candidate.documento} · {candidate.cliente} · R$ {candidate.valor} · vence {candidate.vencimento}</strong></p>}
+              <p><strong>Retida pela validação:</strong> {item.reason}</p>
+              <p>{item.rationale}</p>
+              <References values={item.evidence ?? []} />
+              <p><strong>Próxima consulta:</strong> {item.next_query}</p>
+            </>}
+            {item.status === "sem_atribuicao" && <>
               {candidate && <p>Título apontado: <strong>{candidate.documento} · {candidate.cliente} · R$ {candidate.valor} · vence {candidate.vencimento}</strong></p>}
               <p>{item.rationale}</p>
               <References values={item.evidence ?? []} />
               <p><strong>Próxima consulta:</strong> {item.confirm_with}</p>
-            </> : <p>{item.next_action}</p>}
-            {item.candidates.length > 0 && <details><summary>Ver candidatos pelas regras</summary><ul>{item.candidates.map((entry) => <li key={entry.id}><code>{entry.id}</code> {entry.documento} · {entry.cliente} · R$ {entry.valor} · pistas: {entry.reasons.join(", ")}</li>)}</ul></details>}
+            </>}
+            {(item.candidates?.length ?? 0) > 0 && <details><summary>Ver candidatos pelas regras</summary><ul>{item.candidates?.map((entry) => <li key={entry.id}><code>{entry.id}</code> {entry.documento} · {entry.cliente} · R$ {entry.valor} · pistas: {entry.reasons.join(", ")}</li>)}</ul></details>}
           </div></details>;
         })}
-        <p className="scope-note">A IA decide a atribuição e o executor aplica automaticamente com recibo; o que falta prova fica retido com a próxima consulta.</p>
+        {pages > 1 && <nav className="pager" aria-label="Paginação de créditos">
+          <button type="button" className="action action-quiet" disabled={safePage === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>Anterior</button>
+          <span>Página {safePage + 1} de {pages}</span>
+          <button type="button" className="action action-quiet" disabled={safePage === pages - 1} onClick={() => setPage((value) => Math.min(value + 1, pages - 1))}>Próxima</button>
+        </nav>}
       </section>}
-      <p className="scope-note">Baixas do executor ficam no livro local com recibo idempotente; escrita no ERP requer conector homologado.</p>
     </>}
   </main>;
 }

@@ -56,6 +56,8 @@ h1, h2, h3, p { margin-top: 0; }
 .chip-open { border: 1px solid var(--line); background: var(--surface); color: var(--muted); }
 .chip-warn { background: #fdf3e7; color: #8a5a19; }
 .chip-done { background: #e9f4ee; color: #256c46; }
+.chip-link { background: #eaf1fb; color: #274f8f; }
+.pager { display: flex; align-items: center; gap: 12px; justify-content: flex-end; margin-top: 10px; font-size: 12px; color: var(--muted); }
 .decision-meta { margin: 0; color: var(--muted); }
 .decision-actions { display: flex; gap: 8px; margin-left: auto; }
 .action { padding: 7px 13px; border: 1px solid var(--ink); border-radius: 5px; background: var(--ink); color: var(--surface); font-size: 12px; font-weight: 600; }

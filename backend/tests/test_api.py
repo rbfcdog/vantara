@@ -87,7 +87,7 @@ class AnalystApiTest(unittest.TestCase):
         self.assert_timestamp(body["processed_at"])
         self.assertEqual(body["summary"]["coverage"]["bank_accounts_supplied"], 1)
         self.assertEqual(body["summary"]["coverage"]["bank_accounts_in_case"], 4)
-        self.assertEqual(body["summary"]["receivables"]["titles"], 17)
+        self.assertEqual(body["summary"]["receivables"]["titles"], 64)
         self.assertEqual(body["summary"]["erp_writeoffs_performed"], 0)
         self.assertEqual(next(title for title in body["titles"] if title["document"] == "NF 104580")["bank_lines"],
                          [11])
@@ -100,6 +100,25 @@ class AnalystApiTest(unittest.TestCase):
                       next(case for case in investigation["cases"]
                            if (case["source"], case["line"]) == ("bank", 10))["evidence"])
         self.assertEqual(self.client.get("/api/worklist").json()["investigations"], investigation)
+
+
+    def test_credits_review_covers_every_bank_credit_with_its_outcome(self):
+        body = self.client.get("/api/worklist").json()
+        credits = body["credits_review"]
+        report_credits = {entry["line"] for entry in self.client.get("/api/reconciliation").json()["bank"]
+                          if entry["type"] == "C"}
+        self.assertEqual({credit["line"] for credit in credits}, report_credits)
+        counts = {}
+        for credit in credits:
+            counts[credit["status"]] = counts.get(credit["status"], 0) + 1
+            if credit["status"] == "vinculado_por_referencia":
+                self.assertTrue(credit["title"]["document"])
+                self.assertEqual(len(credit["evidence"]), 2)
+            elif credit["status"] == "baixa_aplicada":
+                self.assertRegex(credit["receipt"], r"^EXE-")
+        # No AI key in tests: rules-only publication holds everything unlinked.
+        self.assertEqual(counts.get("vinculado_por_referencia"), 55)
+        self.assertEqual(credits[-1]["status"] in {"sem_atribuicao", "retida"}, True)
 
     def test_payables_review_publishes_original_invoice_without_ai_key(self):
         closing = self.client.get("/api/reconciliation").json()

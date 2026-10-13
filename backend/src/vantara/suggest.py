@@ -1,4 +1,4 @@
-"""Read-only AI suggestions for bank credits the deterministic engine could not link."""
+"""Model-reviewed suggestions for every bank credit, grounded in reconciled exports."""
 
 import json
 import os
@@ -10,7 +10,7 @@ from .reconcile import _br
 
 _MODEL = "gpt-6-luna"
 _INSTRUCTIONS = (
-    "Você decide, em português, a atribuição de créditos bancários C sem vínculo confirmado, a partir de "
+    "Você revisa TODOS os créditos bancários C (inclusive os vinculados por referência exata), a partir de "
     "fatos numerados dos exports. Retorne APENAS JSON com objeto items, um item para cada bank_line "
     "fornecida, sem itens inventados: {\"items\":[{\"bank_line\":17,"
     "\"verdict\":\"candidato_mais_provavel\"|\"sem_atribuicao\",\"candidate\":\"omie:4\" ou null,"
@@ -18,15 +18,20 @@ _INSTRUCTIONS = (
     "Regras: candidate DEVE ser exatamente um dos candidatos listados para aquele crédito, na forma "
     "'source:linha', ou null quando verdict=sem_atribuicao. Cada evidence deve ser exatamente um ID "
     "arquivo:linha fornecido para AQUELE crédito. "
-    "Seu veredito alimenta um executor automático com guardras próprias: duplicidade entre ERPs, valor "
-    "excedente e candidato fora da lista são retidos pelo executor independentemente da sua decisão. "
-    "Seu papel é decidir a atribuição mais provável: escolha candidato_mais_provavel sempre que os fatos "
-    "comparativos favorecerem claramente UM título sobre os demais (por exemplo mesmo valor E nome "
-    "compatível, enquanto os outros candidatos divergem em valor); reserve sem_atribuicao para ambiguidade "
-    "real: fatos que não diferenciam dois candidatos, nenhum candidato listado ou divergência de valor "
-    "com TODOS os candidatos. No rationale, diga o que sustenta a decisão e o que permanece sem prova; em "
-    "confirm_with, a consulta que validaria a decisão depois (comprovante/ID da transação, consulta ao ERP "
-    "atual). Não proponha criar NF/título a partir do extrato. Não use ferramentas nem outras fontes."
+    "Para crédito com referência exata única, escolha obrigatoriamente o único candidato: a prova "
+    "documental não pode ser trocada nem descartada pela IA. Para os demais, seu veredito alimenta "
+    "um executor automático com guardras próprias: duplicidade entre ERPs, valor excedente e candidato "
+    "fora da lista são retidos pelo executor independentemente da sua decisão. "
+    "Seu papel é decidir a atribuição mais provável: escolha candidato_mais_provavel sempre que houver UM "
+    "título claramente favorecido — mesmo valor que o crédito (ainda que nomes difiram levemente), OU "
+    "identificador forte no histórico (CNPJ completo) apontando para um único candidato, OU valor próximo "
+    "com único candidato e nome compatível (baixa parcial: o executor registra o saldo restante). Reserve "
+    "sem_atribuicao apenas para: nenhum candidato listado, fatos que não diferenciam dois candidatos, ou "
+    "valor que não casa com NENHUM candidato sem identificador forte. Divergência de valor para MAIS não o "
+    "impede de atribuir: o executor retém excesso com motivo. "
+    "No rationale, diga o que sustenta a decisão e o que permanece sem prova; em confirm_with, a consulta "
+    "que validaria a decisão depois (comprovante/ID da transação, consulta ao ERP atual). Não proponha "
+    "criar NF/título a partir do extrato. Não use ferramentas nem outras fontes."
 )
 
 
@@ -34,9 +39,16 @@ def _credits(report: dict) -> list[dict]:
     titles = {(title["source"], title["line"]): title for title in report["titles"]}
     credits = []
     for entry in report["bank"]:
-        if entry["type"] != "C" or entry["status"] != "credito_sem_vinculo_confirmado":
+        if entry["type"] != "C":
             continue
         candidates = []
+        if entry["status"] == "credito_com_referencia":
+            title = titles[(entry["linked_title"]["source"], entry["linked_title"]["line"])]
+            candidates.append({
+                "id": f"{title['source']}:{title['line']}", "reasons": ["referencia_exata_unica"],
+                "documento": title["document"], "cliente": title["customer"],
+                "valor": _br(title["amount"]), "vencimento": title["due"],
+            })
         for clue in entry.get("candidates") or []:
             title = titles.get((clue["source"], clue["line"]))
             if not title:
@@ -54,18 +66,18 @@ def _credits(report: dict) -> list[dict]:
                      "history": entry["history"], "document": entry["document"], "amount": entry["amount"]},
             "candidates": candidates,
             "next_action": entry["next_action"],
+            "exact": entry["status"] == "credito_com_referencia",
         })
     return credits
 
 
 def unlinked_suggestions(report: dict) -> dict:
-    """Rules-first suggestions; optionally annotate in one read-only model call.
-    Model output is accepted only when every item cites candidates and evidence
-    lines that belong to that credit; any violation keeps the deterministic view.
+    """Review every bank credit with the model; reject fabricated or changed exact links.
+    An invalid batch leaves the whole result rules-only, without autonomous writes.
     """
     credits = _credits(report)
     suggestions = [{"bank": credit["bank"], "candidates": credit["candidates"],
-                    "next_action": credit["next_action"]} for credit in credits]
+                    "next_action": credit["next_action"], "exact": credit["exact"]} for credit in credits]
     result = {"method": "regras_sobre_exports", "status": "no_cases" if not credits else "not_configured",
               "suggestions": suggestions}
     if not credits:
@@ -78,21 +90,25 @@ def unlinked_suggestions(report: dict) -> dict:
             titles = [{"id": c["id"], "documento": c["documento"], "cliente": c["cliente"],
                        "valor": c["valor"], "vencimento": c["vencimento"], "pistas": c["reasons"]}
                       for c in credit["candidates"]]
-            excerpts.append({"bank_line": credit["bank"]["line"],
+            excerpts.append({"bank_line": credit["bank"]["line"], "vinculo_exato": credit["exact"],
                              "credito": {"id": credit["bank"]["id"], "data": credit["bank"]["date"],
                                          "historico": credit["bank"]["history"],
                                          "documento": credit["bank"]["document"],
                                          "valor": _br(credit["bank"]["amount"])},
                              "candidatos": titles,
                              "next_action": credit["next_action"]})
-        response = OpenAI().responses.create(model=_MODEL, instructions=_INSTRUCTIONS,
-                                             input=json.dumps({"credits": excerpts}, ensure_ascii=False),
-                                             tools=[], store=False)
-        if response.status != "completed" or not response.output_text:
-            raise ValueError("Resposta incompleta")
-        items = json.loads(response.output_text)["items"]
-        if not isinstance(items, list) or len(items) != len(credits):
-            raise ValueError("Quantidade de itens inválida")
+        items = []
+        client = OpenAI()
+        for start in range(0, len(excerpts), 10):
+            response = client.responses.create(model=_MODEL, instructions=_INSTRUCTIONS,
+                                                 input=json.dumps({"credits": excerpts[start:start + 10]}, ensure_ascii=False),
+                                                 tools=[], store=False)
+            if response.status != "completed" or not response.output_text:
+                raise ValueError("Resposta incompleta")
+            batch = json.loads(response.output_text)["items"]
+            if not isinstance(batch, list) or len(batch) != len(excerpts[start:start + 10]):
+                raise ValueError("Quantidade de itens inválida")
+            items.extend(batch)
         by_line = {credit["bank"]["line"]: credit for credit in credits}
         seen = set()
         pending = {}
@@ -109,6 +125,9 @@ def unlinked_suggestions(report: dict) -> dict:
                     raise ValueError("Sem atribuição não pode ter candidato")
             elif item["candidate"] not in allowed_candidates:
                 raise ValueError("Candidato fora da lista determinística")
+            if credit["exact"] and (item["verdict"] != "candidato_mais_provavel" or
+                                     item["candidate"] != credit["candidates"][0]["id"]):
+                raise ValueError("A IA não pode alterar vínculo exato")
             allowed_ids = {credit["bank"]["id"]} | allowed_candidates
             if (not isinstance(item["evidence"], list) or not item["evidence"] or
                 any(ref not in allowed_ids for ref in item["evidence"]) or

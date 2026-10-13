@@ -11,7 +11,7 @@ from .workflow import _connection
 
 # SHA-256 dataset_id of the four ORIGINAL data_pack exports, in SOURCE_FILES order.
 # Keep this pinned: recomputing it from uploaded/current files would silently enable new datasets.
-ORIGINAL_DATASET = "68c2b2bc79beead40f7d97b3f4104f5331a78dd8ef5e5174de4ed3fd58beff8f"
+ORIGINAL_DATASET = "2f0b4c0f247821eb96b868ee82d164f42873a5539d4ffc0691061fb883a5bf37"
 
 # Synthetic current ERP state and authorization, NOT inferred from an exported "Aberto".
 # The partial policy applies only to this one title/event; no other title has a fixture.

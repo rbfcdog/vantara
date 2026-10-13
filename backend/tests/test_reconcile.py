@@ -23,7 +23,7 @@ class ReconcileTest(unittest.TestCase):
     def test_partial_credit_and_unallocated_pix_remain_separate(self):
         exports = Exports()
         report = reconcile(exports)
-        self.assertEqual(report["counts"], {"protheus": 12, "omie": 5, "bank": 18, "inbox_lines": 65})
+        self.assertEqual(report["counts"], {"protheus": 37, "omie": 27, "bank": 70, "inbox_lines": 65})
         invoice = next(t for t in report["titles"] if t["document"] == "NF 104560")
         self.assertEqual(invoice["status"], "credito_parcial")
         self.assertEqual(invoice["identified_credit"], "62500.00")
@@ -46,7 +46,7 @@ class ReconcileTest(unittest.TestCase):
         credit = report["bank"][-1]
         self.assertEqual(credit["status"], "credito_sem_vinculo_confirmado")
         self.assertEqual(credit["candidates"], [])
-        self.assertEqual(len(report["titles"]), 17)
+        self.assertEqual(len(report["titles"]), 64)
         self.assertNotIn("linked_title", credit)
         self.assertIn("buscar título/nota no faturamento e nos ERPs atuais", credit["next_action"])
         self.assertIn("Não criar NF a partir do extrato", credit["next_action"])
@@ -168,24 +168,24 @@ class ReconcileTest(unittest.TestCase):
                          sum(row["type"] == "C" and row["status"] != "credito_com_referencia"
                              for row in report["bank"]))
         self.assertEqual(report["summary"]["payables"]["possible_repeated_invoice_debits"],
-                         [{"invoice": "NF 99111", "bank_lines": [22, 23], "inbox_lines": []}])
+                         [{"invoice": "NF 99111", "bank_lines": [74, 75], "inbox_lines": []}])
         self.assertEqual(report["summary"]["coverage"]["bank_accounts_supplied"], 1)
         self.assertEqual(report["summary"]["erp_writeoffs_performed"], 0)
         self.assertEqual(json.loads(execute(exports, "get_reconciliation_summary", "{}", report)), report["summary"])
         cases = {(case["source"], case["line"]): case for case in report["investigations"]["cases"]}
-        self.assertIn(("bank", 20), cases)
-        self.assertEqual(cases["bank", 20]["evidence"],
-                         [f"{SOURCE_FILES[2]}:20", f"{SOURCE_FILES[1]}:6"])
-        self.assertIn("FAT-2026-0341", cases["bank", 20]["finding"])
-        self.assertIn("não comprova baixa", cases["bank", 20]["finding"])
-        uncertain = cases["bank", 21]
+        self.assertIn(("bank", 72), cases)
+        self.assertEqual(cases["bank", 72]["evidence"],
+                         [f"{SOURCE_FILES[2]}:72", f"{SOURCE_FILES[1]}:6"])
+        self.assertIn("FAT-2026-0341", cases["bank", 72]["finding"])
+        self.assertIn("não comprova baixa", cases["bank", 72]["finding"])
+        uncertain = cases["bank", 73]
         self.assertIn("origem desconhecida", uncertain["finding"])
         self.assertIn("referencia_ambigua", uncertain["finding"])
-        self.assertIn(f"{SOURCE_FILES[0]}:14", uncertain["evidence"])
+        self.assertIn(f"{SOURCE_FILES[0]}:39", uncertain["evidence"])
         self.assertIn(f"{SOURCE_FILES[1]}:3", uncertain["evidence"])
         self.assertEqual(next(t for t in report["titles"] if t["reference"] == "FAT-2026-0332"
                               and t["source"] == "omie")["bank_lines"], [])
-        for line, other in ((22, 23), (23, 22)):
+        for line, other in ((74, 75), (75, 74)):
             debit_case = cases["bank", line]
             self.assertIn(f"{SOURCE_FILES[2]}:{other}", debit_case["evidence"])
             self.assertIn("NF 99111", debit_case["finding"])

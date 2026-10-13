@@ -91,6 +91,50 @@ def _current_workflow():
     identities = {(row[indices["origem"]], int(row[indices["linha"]])) for row in rows}
     return published["dataset"], identities, report
 
+def _credits_review(published: dict) -> list[dict]:
+    """Every bank credit with its outcome: linked by reference, applied by the
+    executor, held with a reason, or without attribution."""
+    titles = {(title["source"], title["line"]): title for title in published["titles"]}
+    suggestions = {item["bank"]["line"]: item
+                    for item in published.get("receivables_suggestions", {}).get("suggestions", [])}
+    execution = published.get("autonomous_execution", {})
+    applied = {row["event_line"]: row for row in execution.get("applied", [])}
+    held = {row["bank_line"]: row for row in execution.get("pending", [])}
+    credits = []
+    for entry in published["bank"]:
+        if entry["type"] != "C":
+            continue
+        suggestion = suggestions.get(entry["line"], {})
+        item = {"line": entry["line"], "date": entry["date"], "history": entry["history"],
+                "amount": entry["amount"], "document": entry["document"],
+                "reviewed_by_ai": bool(suggestion.get("verdict"))}
+        if entry["status"] == "credito_com_referencia":
+            title = titles[(entry["linked_title"]["source"], entry["linked_title"]["line"])]
+            item["title"] = {"source": title["source"], "line": title["line"], "document": title["document"],
+                             "customer": title["customer"], "amount": title["amount"], "settlement": title["status"]}
+        if entry["line"] in applied:
+            row = applied[entry["line"]]
+            item.update(status="baixa_aplicada", title_document=row["document"], applied_kind=row["kind"],
+                        origin="referencia" if entry["status"] == "credito_com_referencia" else "ia",
+                        balance_after=row["balance_after"], receipt=row["receipt"],
+                        rationale=row["rationale"], evidence=row["evidence"])
+        elif entry["line"] in held and suggestion.get("verdict") not in (None, "sem_atribuicao"):
+            item.update(status="retida", reason=held[entry["line"]]["reason"],
+                        next_query=held[entry["line"]]["next_query"])
+        else:
+            item["status"] = ("vinculado_por_referencia" if entry["status"] == "credito_com_referencia"
+                              else "sem_atribuicao")
+            if entry["status"] == "credito_com_referencia":
+                item["evidence"] = [f"{entry['file']}:{entry['line']}", f"{title['file']}:{title['line']}"]
+        if item["status"] != "baixa_aplicada":
+            item.update(verdict=suggestion.get("verdict"), candidate=suggestion.get("candidate"),
+                        rationale=suggestion.get("rationale"),
+                        evidence=suggestion.get("evidence") or item.get("evidence") or [f"{entry['file']}:{entry['line']}"],
+                        confirm_with=suggestion.get("confirm_with"),
+                        candidates=suggestion.get("candidates", []))
+        credits.append(item)
+    return credits
+
 @app.exception_handler(RequestValidationError)
 async def invalid_request(request, exc):
     if request.url.path not in {"/api/workflow", "/api/workflow/draft"}:
@@ -214,7 +258,8 @@ def get_worklist():
             "summary": published["summary"], "investigations": published.get("investigations"),
             "payables_review": published.get("payables_review"),
             "receivables_suggestions": published.get("receivables_suggestions"),
-            "autonomous_execution": published.get("autonomous_execution")}
+            "autonomous_execution": published.get("autonomous_execution"),
+            "credits_review": _credits_review(published)}
 
 @app.post("/api/exports")
 def upload_exports(payload: ExportRequest):
