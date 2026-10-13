@@ -1,12 +1,12 @@
 import csv
 import re
 import unicodedata
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from io import StringIO
 
-from .sources import CSV_SOURCES, INBOX_KEY
+from .sources import CSV_SOURCES, INBOX_KEY, SOURCE_FILES
 
 
 COLUMNS = {
@@ -79,6 +79,7 @@ def reconcile(sources):
     titles = []
     protheus_by_key = {}
     omie_by_key = {}
+    titles_by_reference = defaultdict(list)
     for alias in ("protheus", "omie"):
         for filename, line, row in _rows(sources, alias):
             is_protheus = alias == "protheus"
@@ -96,6 +97,7 @@ def reconcile(sources):
                      "amount": _money(row["valor"] if is_protheus else row["amount"], filename, line, is_protheus),
                      "export_status": row["status"] if is_protheus else row["paid_flag"]}
             registry[key] = title
+            titles_by_reference[key].append(title)
             titles.append(title)
 
     bank = []
@@ -106,10 +108,12 @@ def reconcile(sources):
         entry = {"file": filename, "line": line, "date": _date(row["data"], filename, line, True),
                  "history": row["historico"], "document": row["documento"].strip(),
                  "amount": _money(row["valor"], filename, line, True), "type": row["tipo"]}
-        if entry["type"] == "C" and entry["document"] in protheus_by_key:
-            exact[entry["document"]].append(entry)
+        matches = titles_by_reference.get(entry["document"], ()) if entry["type"] == "C" else ()
+        if len(matches) == 1:
+            title = matches[0]
+            exact[title["reference"]].append(entry)
             entry["status"] = "credito_com_referencia"
-            entry["linked_title"] = {"source": "protheus", "line": protheus_by_key[entry["document"]]["line"]}
+            entry["linked_title"] = {"source": title["source"], "line": title["line"]}
         else:
             entry["status"] = "debito_a_conferir" if entry["type"] == "D" else "credito_sem_vinculo_confirmado"
         bank.append(entry)
@@ -123,30 +127,27 @@ def reconcile(sources):
 
     for title in titles:
         amount = title["amount"]
-        if title["source"] == "protheus":
-            linked = exact[title["reference"]]
-            credited = sum((entry["amount"] for entry in linked), Decimal("0"))
-            title["identified_credit"] = f"{credited:.2f}"
-            title["difference_before_unlinked_credits"] = f"{amount - credited:.2f}"
-            title["bank_lines"] = [entry["line"] for entry in linked]
-            title["status"] = ("sem_credito_identificado" if not linked else
-                               "credito_parcial" if credited < amount else
-                               "credito_excedente" if credited > amount else "credito_integral_no_extrato")
-        else:
-            title["status"] = "sem_referencia_bancaria_confirmada"
+        linked = exact[title["reference"]]
+        credited = sum((entry["amount"] for entry in linked), Decimal("0"))
+        title["identified_credit"] = f"{credited:.2f}"
+        title["difference_before_unlinked_credits"] = f"{amount - credited:.2f}"
+        title["bank_lines"] = [entry["line"] for entry in linked]
+        title["status"] = ("sem_credito_identificado" if not linked else
+                           "credito_parcial" if credited < amount else
+                           "credito_excedente" if credited > amount else "credito_integral_no_extrato")
+        if title["source"] == "omie":
             title["possible_duplicate_of"] = [
                 {"source": "protheus", "line": other["line"]}
                 for other in protheus_by_key.values()
                 if other["tax_id"] == title["tax_id"] and other["amount"] == amount and other["due"] == title["due"]
             ]
-            if title["possible_duplicate_of"]:
+            if title["possible_duplicate_of"] and title["status"] == "sem_credito_identificado":
                 title["status"] = "possivel_duplicidade_entre_sistemas"
         title["next_action"] = {
             "sem_credito_identificado": "Verificar recebimento e títulos ainda abertos antes de cobrar.",
-            "credito_parcial": "Conferir saldo no ERP e investigar créditos sem vínculo antes de qualquer baixa.",
-            "credito_excedente": "Investigar excedente e possíveis outras faturas antes de qualquer baixa.",
-            "credito_integral_no_extrato": "Confirmar identificação e baixa no ERP; extrato não comprova quitação.",
-            "sem_referencia_bancaria_confirmada": "Solicitar referência/comprovante; candidatos não confirmam pagamento.",
+            "credito_parcial": "Investigar crédito faltante nas fontes disponíveis; não executar baixa parcial sem política autorizada.",
+            "credito_excedente": "Investigar excedente antes de qualquer baixa.",
+            "credito_integral_no_extrato": "Crédito identificado no extrato; confirmar estado no ERP antes de registrar baixa.",
             "possivel_duplicidade_entre_sistemas": "Verificar se é o mesmo título nos dois ERPs antes de cobrar novamente.",
         }[title["status"]]
         title["candidate_bank_credits"] = []
@@ -155,7 +156,7 @@ def reconcile(sources):
         if entry["status"] == "credito_sem_vinculo_confirmado":
             entry["candidates"] = []
             for title in titles:
-                reasons = _hint(entry, title)
+                reasons = (["referencia_ambigua"] if entry["document"] == title["reference"] else []) + _hint(entry, title)
                 if reasons:
                     ref = {"source": title["source"], "line": title["line"]}
                     entry["candidates"].append({**ref, "reasons": reasons})
@@ -167,19 +168,176 @@ def reconcile(sources):
         title["amount"] = f"{title['amount']:.2f}"
     for entry in bank:
         entry["amount"] = f"{entry['amount']:.2f}"
-        entry["next_action"] = ("Conferir a baixa do título no ERP." if entry["status"] == "credito_com_referencia" else
+        entry["next_action"] = ("Consultar estado atual e histórico de baixas do título no ERP; após conferir valor e parcela, registrar a baixa apenas se ainda estiver aberto e confirmar o resultado." if entry["status"] == "credito_com_referencia" else
                                 "Conferir nota, entrega, aprovação e pagamento antes de repetir o débito." if entry["type"] == "D" and entry.get("inbox_lines") else
                                 "Conferir natureza do débito e classificação contábil." if entry["type"] == "D" else
-                                "Solicitar referência/comprovante; não atribuir por nome ou valor.")
+                                "Obter referência/comprovante e confirmar qual título candidato existe no ERP atual; não atribuir por nome ou valor." if entry["candidates"] else
+                                "Identificar a origem do crédito e buscar título/nota no faturamento e nos ERPs atuais; se não houver título, apurar o cadastro com a área responsável. Não criar NF a partir do extrato.")
 
-    return {"scope": "amostra_exportada; saldo e quitação exigem validação humana",
-            "counts": {"protheus": len(protheus_by_key), "omie": len(omie_by_key), "bank": len(bank), "inbox_lines": len(inbox)},
-            "titles": titles, "bank": bank,
-            "inbox": {"file": INBOX_KEY, "note": "Anexos citados não foram fornecidos; mensagens não comprovam aprovação ou pagamento."}}
+    report = {"scope": "um extrato de quatro contas informadas; créditos identificados não comprovam baixa no ERP",
+              "counts": {"protheus": len(protheus_by_key), "omie": len(omie_by_key), "bank": len(bank), "inbox_lines": len(inbox)},
+              "titles": titles, "bank": bank,
+              "inbox": {"file": INBOX_KEY, "note": "Anexos citados não foram fornecidos; mensagens não comprovam aprovação ou pagamento."}}
+    report["summary"] = settlement_summary(report)
+    report["investigations"] = investigate(report, inbox)
+    return report
+
+
+def settlement_summary(report):
+    titles, bank = report["titles"], report["bank"]
+    credits = [row for row in bank if row["type"] == "C"]
+    linked = [row for row in credits if row["status"] == "credito_com_referencia"]
+    unlinked = [row for row in credits if row["status"] != "credito_com_referencia"]
+    debits = [row for row in bank if row["type"] == "D"]
+    by_invoice = defaultdict(list)
+    for debit in debits:
+        number = _invoice(debit["history"])
+        if number:
+            by_invoice[number].append(debit)
+    return {
+        "coverage": {
+            "bank_accounts_supplied": 1, "bank_accounts_in_case": 4,
+            "missing": ["Extratos das outras três contas não fornecidos.",
+                        "Estado atual e histórico de baixas nos ERPs não disponíveis nos exports.",
+                        "Anexos citados na caixa de entrada não fornecidos."]},
+        "receivables": {
+            "titles": len(titles),
+            "by_status": dict(Counter(title["status"] for title in titles)),
+            "full_credit_references": sum(title["status"] == "credito_integral_no_extrato" for title in titles),
+            "bank_credits": len(credits),
+            "bank_credit_amount": f"{sum((Decimal(row['amount']) for row in credits), Decimal('0')):.2f}",
+            "referenced_credits": len(linked),
+            "referenced_credit_amount": f"{sum((Decimal(row['amount']) for row in linked), Decimal('0')):.2f}",
+            "unlinked_credits": len(unlinked),
+            "unlinked_credit_amount": f"{sum((Decimal(row['amount']) for row in unlinked), Decimal('0')):.2f}",
+        },
+        "payables": {
+            "bank_debits": len(debits),
+            "possible_repeated_invoice_debits": [
+                {"invoice": f"NF {number}", "bank_lines": [row["line"] for row in rows],
+                 "inbox_lines": sorted({line for row in rows for line in row.get("inbox_lines", [])})}
+                for number, rows in by_invoice.items() if len(rows) > 1
+            ],
+        },
+        "erp_writeoffs_performed": 0, "supplier_payments_initiated": 0,
+    }
+
+
+def investigate(report, inbox):
+    """Trace observable export links without inferring settlement or a payee."""
+    titles = {(title["source"], title["line"]): title for title in report["titles"]}
+    bank = {entry["line"]: entry for entry in report["bank"]}
+    duplicate_of = defaultdict(list)
+    for title in report["titles"]:
+        for other in title.get("possible_duplicate_of", []):
+            duplicate_of[(other["source"], other["line"])].append(title)
+    repeated = {item["invoice"]: item["bank_lines"]
+                for item in report["summary"]["payables"]["possible_repeated_invoice_debits"]}
+    inbox_context = {}
+
+    def cite(row):
+        return f"{row['file']}:{row['line']}"
+
+    def describe(title):
+        return (f"{title['source']} {title['document']} (referência {title['reference']}, "
+                f"R$ {_br(title['amount'])}, {cite(title)})")
+
+    cases = []
+    for entry in report["bank"]:
+        evidence = [cite(entry)]
+        if entry["type"] == "C":
+            if entry["status"] == "credito_com_referencia":
+                title = titles[(entry["linked_title"]["source"], entry["linked_title"]["line"])]
+                evidence.append(cite(title))
+                finding = (f"Crédito R$ {_br(entry['amount'])} com referência {entry['document']} vinculado a "
+                           f"{describe(title)}; export ERP registra {title['export_status']}, mas o extrato "
+                           "não comprova baixa no ERP.")
+                next_query = entry["next_action"]
+            else:
+                candidates = [titles[(item["source"], item["line"])] for item in entry["candidates"]]
+                evidence.extend(cite(title) for title in candidates)
+                leads = "; ".join(
+                    f"{describe(title)} (pistas: {', '.join(item['reasons'])})"
+                    for item, title in zip(entry["candidates"], candidates)
+                )
+                finding = (f"Crédito R$ {_br(entry['amount'])} ({entry['history']}, documento "
+                           f"{entry['document'] or 'vazio'}) de origem desconhecida; "
+                           f"candidatos não atribuídos: {leads or 'nenhum nos exports'}. "
+                           "Primeiro elo não demonstrado: identificação da origem e do título.")
+                next_query = entry["next_action"]
+        else:
+            invoice = _invoice(entry["history"])
+            if not invoice and not entry.get("inbox_lines"):
+                continue
+            inbox_lines = entry.get("inbox_lines", [])
+            evidence.extend(f"{report['inbox']['file']}:{line}" for line in inbox_lines)
+            siblings = repeated.get(f"NF {invoice}", []) if invoice else []
+            evidence.extend(cite(bank[line]) for line in siblings if line != entry["line"])
+            if invoice and invoice not in inbox_context:
+                inbox_context[invoice] = sorted({
+                    neighbor for line in inbox_lines
+                    for neighbor in range(max(1, line - 5), min(len(inbox), line + 5) + 1)
+                    if neighbor == line or re.search(
+                        r"valor|venc|entreg|aprov|pag|cobr|boleto|pedido|acho que sim|nao sei|não sei|\bNF\s*\d+|nota fiscal",
+                        inbox[neighbor - 1], re.IGNORECASE)
+                })
+            context_lines = inbox_context.get(invoice, [])
+            evidence.extend(f"{report['inbox']['file']}:{line}" for line in context_lines)
+            messages = "; ".join(
+                f"{report['inbox']['file']}:{line} {inbox[line - 1].strip()}"
+                for line in context_lines if inbox[line - 1].strip()
+            )
+            inbox_refs = ", ".join(f"{report['inbox']['file']}:{line}" for line in inbox_lines)
+            other_debits = ", ".join(str(line) for line in siblings if line != entry["line"])
+            inbox_trace = f"mensagem sobre a NF em {inbox_refs}" if inbox_refs else "sem mensagem correspondente na caixa"
+            debit_trace = (f"outras linhas D para a mesma NF: {other_debits}" if other_debits
+                           else "sem outra linha D identificada para a mesma NF")
+            finding = (f"Débito R$ {_br(entry['amount'])} no extrato com referência "
+                       f"{'NF ' + invoice if invoice else entry['history']}; "
+                       f"{inbox_trace}; {debit_trace}. "
+                       f"Trechos próximos da caixa (alegações, não comprovantes): {messages or 'nenhum'}. "
+                       "Primeiro elo não demonstrado: favorecido, nota aprovada e quitação do fornecedor.")
+            next_query = ("Conferir favorecido e comprovante bancário, nota, entrega, aprovação e "
+                          "eventual duplicidade antes de reconhecer pagamento ao fornecedor.")
+        cases.append({"source": "bank", "line": entry["line"], "status": entry["status"],
+                      "finding": finding, "evidence": list(dict.fromkeys(evidence)),
+                      "next_query": next_query})
+
+    for title in report["titles"]:
+        key = (title["source"], title["line"])
+        related = [titles[(item["source"], item["line"])] for item in title.get("possible_duplicate_of", [])]
+        related.extend(duplicate_of[key])
+        if title["status"] == "credito_integral_no_extrato" and not related:
+            continue
+        linked = [bank[line] for line in title["bank_lines"]]
+        candidates = [(bank[item["line"]], item["reasons"]) for item in title["candidate_bank_credits"]]
+        evidence = [cite(title)]
+        evidence.extend(cite(entry) for entry in linked)
+        evidence.extend(cite(entry) for entry, _ in candidates)
+        evidence.extend(cite(other) for other in related)
+        links = ", ".join(f"{cite(entry)} (R$ {_br(entry['amount'])})" for entry in linked) or "nenhum"
+        leads = "; ".join(f"{cite(entry)} (R$ {_br(entry['amount'])}, pistas: {', '.join(reasons)}; não atribuído)"
+                          for entry, reasons in candidates) or "nenhum"
+        duplicates = "; ".join(describe(other) for other in related) or "nenhum"
+        finding = (f"{describe(title)}: export ERP registra {title['export_status']}; "
+                   f"créditos vinculados por referência: {links}, total R$ {_br(title['identified_credit'])}, "
+                   f"diferença antes dos créditos sem vínculo R$ {_br(title['difference_before_unlinked_credits'])}; "
+                   f"créditos candidatos sem vínculo: {leads}; possível duplicidade entre ERPs: {duplicates}. "
+                   "Extrato de apenas uma das quatro contas; nenhum crédito candidato comprova quitação "
+                   "e a baixa atual no ERP não foi consultada.")
+        next_query = (f"Consultar estado atual e histórico de baixas de {title['reference']} no "
+                      f"{title['source']}; confrontar as outras três contas"
+                      + (" e verificar se os títulos dos dois ERPs representam a mesma cobrança."
+                         if related else " antes de cobrar ou baixar."))
+        cases.append({"source": title["source"], "line": title["line"], "status": title["status"],
+                      "finding": finding, "evidence": list(dict.fromkeys(evidence)),
+                      "next_query": next_query})
+    return {"method": "regras_sobre_exports", "consulted": list(SOURCE_FILES),
+            "gaps": report["summary"]["coverage"]["missing"], "cases": cases}
 
 
 def overview(report):
-    return {"scope": report["scope"], "counts": report["counts"],
+    return {"scope": report["scope"], "counts": report["counts"], "summary": report["summary"],
             "titles": [{"source": t["source"], "line": t["line"], "document": t["document"],
                         "amount": t["amount"], "status": t["status"],
                         "identified_credit": t.get("identified_credit"), "bank_lines": t.get("bank_lines", []),
@@ -248,8 +406,10 @@ def worklist(report):
     bank_file = CSV_SOURCES["bank"][0]
     for title in report["titles"]:
         status = title["status"]
+        if status == "credito_integral_no_extrato" and not title.get("possible_duplicate_of"):
+            continue
         priority = ("alta" if status in {"credito_parcial", "credito_excedente", "possivel_duplicidade_entre_sistemas"}
-                    else "baixa" if status == "credito_integral_no_extrato" else "media")
+                    or title.get("possible_duplicate_of") else "media")
         evidence = [f"{title['file']}:{title['line']}"]
         evidence += [f"{bank_file}:{line}" for line in title.get("bank_lines", [])]
         evidence += [f"{bank_file}:{item['line']}" for item in title["candidate_bank_credits"]]

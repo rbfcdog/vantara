@@ -1,6 +1,6 @@
 const backendUrl = process.env.BACKEND_URL || "http://127.0.0.1:8000";
 
-type BackendPath = "/api/worklist" | "/api/worklist.csv" | "/api/case" | "/api/ask" | "/api/exports" | "/api/workflow" | "/api/workflow/draft";
+type BackendPath = "/api/worklist" | "/api/worklist.csv" | "/api/case" | "/api/ask" | "/api/exports" | "/api/workflow" | "/api/workflow/draft" | "/api/demo/operations" | "/api/demo/operations/run";
 
 export function backendTarget(path: BackendPath) {
   const url = new URL(path, backendUrl);

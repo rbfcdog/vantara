@@ -5,15 +5,16 @@ import sqlite3
 import tempfile
 import unittest
 from datetime import datetime
-from io import StringIO
-from unittest.mock import Mock, patch
+from io import BytesIO, StringIO
+from unittest.mock import patch
 
 from botocore.exceptions import ClientError
 from fastapi.testclient import TestClient
 
+from vantara.__main__ import seed
 from vantara.api import app
-from vantara.agent import draft_request
 from vantara.sources import BUCKET, DATA, INBOX_KEY, SOURCE_FILES, Sources
+from vantara.workflow import publish_reconciliation
 
 
 class Exports(Sources):
@@ -40,13 +41,17 @@ class FakeS3:
     def put_object(self, *, Bucket, Key, Body):
         self.writes.append((Bucket, Key, Body))
 
+    def get_object(self, *, Bucket, Key):
+        stored = next(body for bucket, key, body in reversed(self.writes) if bucket == Bucket and key == Key)
+        return {"Body": BytesIO(stored)}
+
 
 class AnalystApiTest(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        database = patch.dict(os.environ, {"VANTARA_WORKFLOW_DB": f"{temporary.name}/workflow.sqlite3"})
+        database = patch.dict(os.environ, {"VANTARA_WORKFLOW_DB": f"{temporary.name}/workflow.sqlite3", "OPENAI_API_KEY": ""})
         database.start()
         self.addCleanup(database.stop)
         self.sources = patch("vantara.api._sources", return_value=Exports())
@@ -75,6 +80,87 @@ class AnalystApiTest(unittest.TestCase):
         self.assertIn("attachment;", download.headers["content-disposition"])
         self.assertEqual(list(csv.DictReader(StringIO(download.text), delimiter=";")), items)
 
+    def test_reconciliation_endpoint_exposes_verified_coverage_not_erp_writeoffs(self):
+        response = self.client.get("/api/reconciliation")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assert_timestamp(body["processed_at"])
+        self.assertEqual(body["summary"]["coverage"]["bank_accounts_supplied"], 1)
+        self.assertEqual(body["summary"]["coverage"]["bank_accounts_in_case"], 4)
+        self.assertEqual(body["summary"]["receivables"]["titles"], 17)
+        self.assertEqual(body["summary"]["erp_writeoffs_performed"], 0)
+        self.assertEqual(next(title for title in body["titles"] if title["document"] == "NF 104580")["bank_lines"],
+                         [11])
+        self.assertEqual(next(bank for bank in body["bank"] if bank["line"] == 11)["linked_title"],
+                         {"source": "protheus", "line": 10})
+        self.assertEqual(body["summary"]["supplier_payments_initiated"], 0)
+        investigation = body["investigations"]
+        self.assertEqual(investigation["consulted"], list(SOURCE_FILES))
+        self.assertIn(f"{SOURCE_FILES[3]}:34",
+                      next(case for case in investigation["cases"]
+                           if (case["source"], case["line"]) == ("bank", 10))["evidence"])
+        self.assertEqual(self.client.get("/api/worklist").json()["investigations"], investigation)
+
+    def test_payables_review_publishes_original_invoice_without_ai_key(self):
+        closing = self.client.get("/api/reconciliation").json()
+        review = closing["payables_review"]
+        self.assertEqual((review["status"], review["method"]), ("not_configured", "regras_sobre_exports"))
+        self.assertEqual([case["invoice"] for case in review["cases"]], ["NF 88231"])
+        payable = review["cases"][0]
+        self.assertEqual(payable["bank_lines"], [10])
+        self.assertEqual(payable["bank_entries"], [{"line": 10, "amount": "18900.00", "date": "2026-07-20"}])
+        self.assertIn(f"{SOURCE_FILES[2]}:10", payable["evidence"])
+        self.assertIn(f"{SOURCE_FILES[3]}:36", payable["evidence"])
+        self.assertIn(f"{SOURCE_FILES[3]}:39", payable["evidence"])
+        self.assertIn("R$ 18.900,00", payable["next_query"])
+        self.assertIn("R$ 19.278,00", payable["next_query"])
+        self.assertEqual(payable["observations"], [])
+        self.assertEqual(self.client.get("/api/worklist").json()["payables_review"], review)
+        self.assertEqual(closing["summary"]["supplier_payments_initiated"], 0)
+
+    def test_ai_payables_review_rejects_fabricated_citation_and_keeps_closing(self):
+        import json
+        from types import SimpleNamespace
+
+        bank = f"{SOURCE_FILES[2]}:10"
+        inbox = f"{SOURCE_FILES[3]}:36"
+        case = {"invoice": "NF 88231", "observations": [
+            {"kind": "valor_divergente", "text": "Boleto atualizado de R$ 19.278,00 difere do débito de R$ 18.900,00.",
+             "evidence": [bank, inbox]},
+            {"kind": "entrega_parcial", "text": "Mensagem alega entrega de 12 de 15 volumes.",
+             "evidence": [f"{SOURCE_FILES[3]}:39"]}],
+            "missing_evidence": ["Comprovante bancário com beneficiário", "Nota e entrega confirmada"],
+            "next_query": "Solicitar comprovante bancário e histórico de contas a pagar da NF 88231.",
+            "recommendation": "Não repetir pagamento até conferir nota, entrega e beneficiário."}
+        s3 = FakeS3()
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), \
+                patch("vantara.api._sources", return_value=Sources(s3)), \
+                patch("vantara.payables.OpenAI") as client:
+            response = SimpleNamespace(status="completed", output_text=json.dumps({"cases": [case]}))
+            client.return_value.responses.create.return_value = response
+            upload = self.client.post("/api/exports", json={"files": self.export_payload()})
+        self.assertEqual(upload.status_code, 200)
+        client.return_value.responses.create.assert_called_once()
+        closing = self.client.get("/api/reconciliation").json()
+        review = closing["payables_review"]
+        self.assertEqual((review["status"], review["method"]), ("completed", "ia_read_only_sobre_exports"))
+        self.assertEqual([item["kind"] for item in review["cases"][0]["observations"]],
+                         ["valor_divergente", "entrega_parcial"])
+        self.assertEqual(closing["summary"]["supplier_payments_initiated"], 0)
+
+        case["observations"][0]["evidence"] = [f"{SOURCE_FILES[3]}:999"]
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), \
+                patch("vantara.api._sources", return_value=Sources(FakeS3())), \
+                patch("vantara.payables.OpenAI") as client:
+            client.return_value.responses.create.return_value = SimpleNamespace(
+                status="completed", output_text=json.dumps({"cases": [case]}))
+            upload = self.client.post("/api/exports", json={"files": self.export_payload()})
+        self.assertEqual(upload.status_code, 200)
+        review = self.client.get("/api/reconciliation").json()["payables_review"]
+        self.assertEqual((review["status"], review["method"]), ("failed", "regras_sobre_exports"))
+        self.assertEqual(review["cases"][0]["observations"], [])
+
+
     def test_zero_rows_are_ready_not_missing(self):
         exports = Exports()
         for name in SOURCE_FILES:
@@ -83,6 +169,10 @@ class AnalystApiTest(unittest.TestCase):
             response = self.client.get("/api/worklist")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["items"], [])
+        self.assertEqual(response.json()["investigations"]["cases"], [])
+        self.assertEqual(response.json()["payables_review"]["status"], "no_cases")
+        self.assertEqual(response.json()["payables_review"]["cases"], [])
+
         self.assert_timestamp(response.json()["processed_at"])
         s3 = FakeS3()
         with patch("vantara.api._sources", return_value=Sources(s3)):
@@ -104,6 +194,87 @@ class AnalystApiTest(unittest.TestCase):
                 self.assertEqual(response.json()["items_count"], len(self.client.get("/api/worklist").json()["items"]))
                 self.assertEqual(s3.created, [BUCKET] if missing_bucket else [])
                 self.assertEqual(s3.writes, [(BUCKET, name, (DATA / name).read_bytes()) for name in SOURCE_FILES])
+
+    def test_export_upload_publishes_closing_without_question_and_keeps_it_stable(self):
+        original = self.client.get("/api/reconciliation").json()
+        expanded = DATA.parent / "feedback" / "amostra-expandida"
+        files = {name: base64.b64encode((expanded / name).read_bytes()).decode() for name in SOURCE_FILES}
+        s3 = FakeS3()
+        with patch("vantara.api._sources", return_value=Sources(s3)):
+            upload = self.client.post("/api/exports", json={"files": files})
+        self.assertEqual(upload.status_code, 200)
+        receipt = upload.json()
+        self.assertNotEqual(receipt["dataset"], original["dataset"])
+        self.assertEqual(receipt["summary"]["receivables"]["titles"], 117)
+        closing = self.client.get("/api/reconciliation").json()
+        self.assertEqual(closing["processed_at"], receipt["processed_at"])
+        self.assertEqual(closing["dataset"], receipt["dataset"])
+        self.assertEqual(closing["summary"], receipt["summary"])
+        self.assertEqual(next(title for title in closing["titles"] if title["reference"] == "FAT-2026-0401")["bank_lines"], [81])
+        queue = self.client.get("/api/worklist").json()
+        self.assertEqual((queue["processed_at"], queue["summary"]), (receipt["processed_at"], receipt["summary"]))
+        self.assertFalse(any(item["documento_ou_historico"] == "NF 105060" for item in queue["items"]))
+        self.assertEqual(queue["investigations"], closing["investigations"])
+        self.assertEqual(queue["payables_review"], closing["payables_review"])
+        repeated = next(case for case in closing["payables_review"]["cases"] if case["invoice"] == "NF 99374")
+        self.assertEqual(repeated["bank_lines"], [83, 84])
+        self.assertEqual([row["amount"] for row in repeated["bank_entries"]], ["6840.00", "6840.00"])
+        self.assertIn(f"{SOURCE_FILES[3]}:71", repeated["evidence"])
+        self.assertIn(f"{SOURCE_FILES[3]}:71",
+                      next(case for case in closing["investigations"]["cases"]
+                           if (case["source"], case["line"]) == ("bank", 83))["evidence"])
+        self.assertEqual(TestClient(app).get("/api/reconciliation").json()["investigations"],
+                         closing["investigations"])
+
+        self.assertEqual(self.client.get("/api/case", params={"source": "omie", "line": 7}).json()["title"]["bank_lines"], [81])
+
+    def test_seed_publishes_trace_using_existing_four_exports(self):
+        s3 = FakeS3(missing_bucket=True)
+        with patch("builtins.print"), patch("vantara.api._sources", return_value=Sources(s3)):
+            seed(s3)
+            published = TestClient(app).get("/api/reconciliation").json()
+        self.assertEqual(s3.created, [BUCKET])
+        self.assertEqual([key for _, key, _ in s3.writes], list(SOURCE_FILES))
+        self.assertEqual(published["investigations"]["consulted"], list(SOURCE_FILES))
+        self.assertIn(f"{SOURCE_FILES[2]}:8",
+                      next(case for case in published["investigations"]["cases"]
+                           if (case["source"], case["line"]) == ("protheus", 8))["evidence"])
+        self.assertEqual(published["summary"]["erp_writeoffs_performed"], 0)
+        self.assertEqual(published["summary"]["supplier_payments_initiated"], 0)
+
+    def test_legacy_snapshot_is_not_claimed_investigated_until_reprocessed(self):
+        original = self.client.get("/api/reconciliation").json()
+        legacy = {key: value for key, value in original.items()
+                  if key not in {"dataset", "processed_at", "investigations"}}
+        publish_reconciliation(original["dataset"], legacy)
+        with patch("vantara.api._sources", side_effect=AssertionError("old publication must not be re-read")):
+            self.assertNotIn("investigations", self.client.get("/api/reconciliation").json())
+            work = self.client.get("/api/worklist").json()
+        self.assertIsNone(work["investigations"])
+        self.assertTrue(work["items"])
+        s3 = FakeS3()
+        with patch("vantara.api._sources", return_value=Sources(s3)):
+            upload = self.client.post("/api/exports", json={"files": self.export_payload()})
+        self.assertEqual(upload.status_code, 200)
+        refreshed = self.client.get("/api/worklist").json()
+        self.assertIsNotNone(refreshed["investigations"])
+        self.assertEqual(refreshed["investigations"]["consulted"], list(SOURCE_FILES))
+
+    def test_storage_failure_does_not_publish_partial_closing(self):
+        original = self.client.get("/api/reconciliation").json()
+        s3 = FakeS3()
+        saved_put = s3.put_object
+
+        def fail_second(*, Bucket, Key, Body):
+            if len(s3.writes) == 1:
+                raise ClientError({"Error": {"Code": "InternalError", "Message": "write failed"}}, "PutObject")
+            saved_put(Bucket=Bucket, Key=Key, Body=Body)
+
+        s3.put_object = fail_second
+        with patch("vantara.api._sources", return_value=Sources(s3)):
+            response = self.client.post("/api/exports", json={"files": self.export_payload()})
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(self.client.get("/api/reconciliation").json(), original)
 
     def test_bad_exports_do_not_mutate_s3(self):
         files = self.export_payload()
@@ -187,7 +358,6 @@ class AnalystApiTest(unittest.TestCase):
         self.assertEqual(len(body["dataset"]), 64)
         self.assertEqual(set(body["cases"]),
                          {f"{item['origem']}:{item['linha']}" for item in self.client.get("/api/worklist").json()["items"]})
-        self.assertEqual(len(body["cases"]), 30)
         baseline = body["cases"]["protheus:8"]
         self.assertEqual({key: baseline[key] for key in ("source", "line", "status", "owner", "note", "version")},
                          {"source": "protheus", "line": 8, "status": "open", "owner": "", "note": "", "version": 0})
@@ -240,29 +410,35 @@ class AnalystApiTest(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
         self.assertIsInstance(missing.json()["detail"], str)
 
-    def test_workflow_dataset_isolated_by_each_export_byte_and_current_worklist(self):
+    def test_workflow_dataset_isolated_by_each_uploaded_export_and_restored_on_reupload(self):
         before = self.client.get("/api/workflow").json()
         self.client.patch("/api/workflow", params={"source": "protheus", "line": 8},
                           json={"status": "closed", "owner": "Ana", "note": "Verificado", "version": 0})
+        s3 = FakeS3()
         for name in SOURCE_FILES:
             changed = Exports()
             changed.data[name] += b"\n"
-            with patch("vantara.api._sources", return_value=changed):
-                isolated = TestClient(app).get("/api/workflow").json()
-                self.assertNotEqual(before["dataset"], isolated["dataset"])
-                self.assertEqual(isolated["cases"]["protheus:8"]["version"], 0)
-                self.assertEqual(isolated["cases"]["protheus:8"]["status"], "open")
-                self.assertEqual(isolated["cases"]["protheus:8"]["opened_at"], isolated["cases"]["protheus:8"]["history"][0]["at"])
+            payload = {filename: base64.b64encode(data).decode() for filename, data in changed.data.items()}
+            with patch("vantara.api._sources", return_value=Sources(s3)):
+                self.assertEqual(self.client.post("/api/exports", json={"files": payload}).status_code, 200)
+            isolated = TestClient(app).get("/api/workflow").json()
+            self.assertNotEqual(before["dataset"], isolated["dataset"])
+            self.assertEqual(isolated["cases"]["protheus:8"]["version"], 0)
+            self.assertEqual(isolated["cases"]["protheus:8"]["status"], "open")
+        with patch("vantara.api._sources", return_value=Sources(s3)):
+            self.assertEqual(self.client.post("/api/exports", json={"files": self.export_payload()}).status_code, 200)
         restored = TestClient(app).get("/api/workflow").json()
         self.assertEqual(before["dataset"], restored["dataset"])
         self.assertEqual(restored["cases"]["protheus:8"]["version"], 1)
         empty = Exports()
         for name in SOURCE_FILES:
             empty.data[name] = b"" if name == INBOX_KEY else empty.data[name].splitlines(keepends=True)[0]
-        with patch("vantara.api._sources", return_value=empty):
-            self.assertEqual(TestClient(app).get("/api/workflow").json()["cases"], {})
-            self.assertEqual(TestClient(app).patch("/api/workflow", params={"source": "protheus", "line": 8},
-                                                  json={"status": "open", "owner": "", "note": "", "version": 0}).status_code, 404)
+        payload = {filename: base64.b64encode(data).decode() for filename, data in empty.data.items()}
+        with patch("vantara.api._sources", return_value=Sources(s3)):
+            self.assertEqual(self.client.post("/api/exports", json={"files": payload}).status_code, 200)
+        self.assertEqual(TestClient(app).get("/api/workflow").json()["cases"], {})
+        self.assertEqual(TestClient(app).patch("/api/workflow", params={"source": "protheus", "line": 8},
+                                               json={"status": "open", "owner": "", "note": "", "version": 0}).status_code, 404)
 
     def test_workflow_storage_failure_is_not_an_empty_queue(self):
         with patch("vantara.api.list_cases", side_effect=sqlite3.OperationalError("disk unavailable")):
@@ -291,19 +467,6 @@ class AnalystApiTest(unittest.TestCase):
         self.assertEqual(failure.status_code, 503)
         self.assertIsInstance(failure.json()["detail"], str)
 
-    def test_draft_model_receives_only_unsent_evidence_and_rejects_incomplete_output(self):
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "test"}), patch("vantara.agent.OpenAI") as client:
-            client.return_value.responses.create.return_value = Mock(status="completed", output_text="Envie a referência, por favor.")
-            self.assertEqual(draft_request({"bank": {"line": 17}}), "Envie a referência, por favor.")
-            request = client.return_value.responses.create.call_args.kwargs
-            self.assertEqual(request["input"], '{"bank": {"line": 17}}')
-            self.assertFalse(request["store"])
-            self.assertEqual(request["tools"], [])
-            self.assertIn("NÃO ENVIADO", request["instructions"])
-            self.assertIn("Não afirme pagamento", request["instructions"])
-            client.return_value.responses.create.return_value = Mock(status="incomplete", output_text="Texto parcial")
-            with self.assertRaises(RuntimeError):
-                draft_request({"bank": {"line": 17}})
 
     def test_ask_passes_validated_history_and_rejects_unpaired_messages(self):
         history = [

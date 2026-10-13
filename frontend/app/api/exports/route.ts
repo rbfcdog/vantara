@@ -14,7 +14,7 @@ export async function POST(request: Request) {
     return Response.json({ error: "Envie os quatro exports em JSON." }, { status: 415 });
   }
   const reader = request.body?.getReader();
-  if (!reader) return Response.json({ error: "Envie os quatro arquivos originais." }, { status: 400 });
+  if (!reader) return Response.json({ error: "Envie os quatro arquivos esperados." }, { status: 400 });
   let size = 0;
   let text = "";
   const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -39,12 +39,12 @@ export async function POST(request: Request) {
   }
   if (!payload || typeof payload !== "object" || !("files" in payload) || !payload.files ||
     typeof payload.files !== "object" || Array.isArray(payload.files) || Object.keys(payload).length !== 1) {
-    return Response.json({ error: "Selecione exatamente os quatro arquivos originais." }, { status: 400 });
+    return Response.json({ error: "Selecione exatamente os quatro exports esperados." }, { status: 400 });
   }
   const files = payload.files as Record<string, unknown>;
   const names = Object.keys(files);
   if (names.length !== sourceFiles.length || names.some((name) => !sourceFiles.includes(name))) {
-    return Response.json({ error: "Selecione os quatro exports originais sem renomear nem adicionar arquivos." }, { status: 400 });
+    return Response.json({ error: "Selecione os quatro exports com os nomes esperados, sem renomear nem adicionar arquivos." }, { status: 400 });
   }
   for (const name of sourceFiles) {
     const encoded = files[name];

@@ -31,6 +31,10 @@ def _connection():
         version INTEGER NOT NULL, history TEXT NOT NULL,
         PRIMARY KEY (dataset, source, line)
     )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS published_reconciliation (
+        slot INTEGER PRIMARY KEY CHECK (slot = 1),
+        dataset TEXT NOT NULL, processed_at TEXT NOT NULL, report TEXT NOT NULL
+    )""")
     return connection
 
 
@@ -50,6 +54,23 @@ def _ensure(connection, dataset, source, line):
         (dataset, source, line, status, owner, note, opened_at, updated_at, version, history)
         VALUES (?, ?, ?, 'open', '', '', ?, ?, 0, ?)""",
                        (dataset, source, line, at, at, history))
+
+
+def publish_reconciliation(dataset: str, report: dict) -> dict:
+    processed_at = _now()
+    with closing(_connection()) as connection, connection:
+        connection.execute("""INSERT INTO published_reconciliation (slot, dataset, processed_at, report)
+            VALUES (1, ?, ?, ?)
+            ON CONFLICT(slot) DO UPDATE SET dataset = excluded.dataset,
+                processed_at = excluded.processed_at, report = excluded.report""",
+                           (dataset, processed_at, json.dumps(report, ensure_ascii=False)))
+    return {"dataset": dataset, "processed_at": processed_at, **report}
+
+
+def latest_reconciliation() -> dict | None:
+    with closing(_connection()) as connection:
+        row = connection.execute("SELECT dataset, processed_at, report FROM published_reconciliation WHERE slot = 1").fetchone()
+    return {"dataset": row["dataset"], "processed_at": row["processed_at"], **json.loads(row["report"])} if row else None
 
 
 def list_cases(dataset: str, identities: set[tuple[str, int]]) -> dict[str, dict]:

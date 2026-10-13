@@ -4,7 +4,7 @@ import os
 from openai import OpenAI
 
 from .prompt import INSTRUCTIONS
-from .reconcile import case_bundle, format_case, overview, reconcile
+from .reconcile import case_bundle, format_case, reconcile
 from .sources import Sources
 from .tools import TOOLS, execute
 
@@ -17,12 +17,23 @@ def draft_request(evidence: dict, model: str = "gpt-6-luna") -> str:
         raise RuntimeError("Defina OPENAI_API_KEY antes de gerar o rascunho.")
     response = OpenAI().responses.create(
         model=model,
-        instructions=("Escreva em português somente um rascunho NÃO ENVIADO de solicitação de "
-                      "comprovante ou referência para esclarecer crédito sem vínculo. Use somente "
-                      "data e valor fornecidos; não cite nomes, CNPJ, notas, faturas ou pistas internas. "
-                      "Não afirme pagamento, quitação, baixa ou saldo e não solicite nem execute "
-                      "pagamento. Não diga que a mensagem foi enviada. Responda apenas com o texto "
-                      "da solicitação."),
+        instructions=("Você prepara, em português, um RASCUNHO NÃO ENVIADO de solicitação "
+                      "de identificação de crédito bancário C sem vínculo com título a receber. "
+                      "A entrada é um ou mais pares data/valor, e SOMENTE estes são fatos "
+                      "disponíveis: não há pagador, CNPJ, referência, título, banco, contato "
+                      "verificado ou comprovante. Para cada crédito, indique data e valor "
+                      "separadamente e peça o número da fatura ou o nosso número do boleto, "
+                      "quando houver, e o identificador/comprovante da transação para "
+                      "permitir a conferência. Não atribua créditos iguais "
+                      "a um mesmo título nem invente NF, beneficiário ou remetente. A entrada "
+                      "no extrato não confirma quitação, saldo nem baixa no ERP; não solicite "
+                      "novo pagamento, dados bancários sensíveis ou documentos além dos "
+                      "necessários para identificar o crédito. Não afirme que o destinatário "
+                      "recebeu o pedido, que houve cobrança, que o contato foi verificado ou "
+                      "que algo foi enviado. Devolva apenas o corpo da mensagem curta "
+                      "para uma pessoa externa, sem título, cabeçalho, assinatura, nomes "
+                      "dos ERPs, termos de contabilidade nem comentário técnico sobre "
+                      "quitação ou baixa."),
         input=json.dumps(evidence, ensure_ascii=False),
         tools=[],
         store=False,
@@ -41,15 +52,14 @@ def run(question: str, sources: Sources, model: str = "gpt-6-luna", include_doss
     client = OpenAI()
     report = reconcile(sources)
     dossier = case_bundle(report, question)
-    context = json.dumps(dossier if dossier else overview(report), ensure_ascii=False)
+    context = json.dumps(dossier if dossier else report["summary"], ensure_ascii=False)
     messages = [*history, {"role": "user", "content": question}] if history else [{"role": "user", "content": question}]
     calls = 0
     while True:
         response = client.responses.create(
             model=model, instructions=INSTRUCTIONS + (
-                "\nDossiê completo dos títulos citados; cite apenas interpretação e riscos novos, "
-                "sem repetir os fatos que o CLI já exibirá:\n" if dossier else
-                "\nPanorama da amostra; use as ferramentas para aprofundar e pagine se a pergunta exigir cobertura integral:\n"
+                "\nDossiê dos títulos citados; explique a conclusão com linhas de evidência e lacunas:\n" if dossier else
+                "\nResumo calculado da amostra; consulte registros para detalhes. Sem cobertura total dos quatro bancos:\n"
             ) + context + "\nMensagens anteriores ajudam a entender referências como 'esse PIX', mas não são "
             "evidência. Confira novamente as fontes atuais antes de afirmar fatos.",
             input=messages, tools=TOOLS,

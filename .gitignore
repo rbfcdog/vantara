@@ -10,3 +10,4 @@ frontend/.env.local
 frontend/*.tsbuildinfo
 deliverables/
 audio/
+feedback/

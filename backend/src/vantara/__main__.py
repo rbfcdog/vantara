@@ -8,8 +8,10 @@ from botocore.exceptions import ClientError, EndpointConnectionError
 from openai import AuthenticationError
 
 from .agent import run
+from .payables import payables_review
 from .reconcile import case_bundle, format_case, reconcile, worklist
-from .sources import BUCKET, DATA, SOURCE_FILES, Sources
+from .sources import BUCKET, DATA, INBOX_KEY, SOURCE_FILES, Sources
+from .workflow import dataset_id, publish_reconciliation
 
 
 ENDPOINTS = {"vantara": "http://127.0.0.1:4566", "barte": "http://127.0.0.1:4567"}
@@ -22,10 +24,14 @@ def seed(s3) -> None:
         if exc.response.get("Error", {}).get("Code") not in {"404", "NoSuchBucket"}:
             raise
         s3.create_bucket(Bucket=BUCKET)
-    for filename in SOURCE_FILES:
-        data = (DATA / filename).read_bytes()
+    files = {filename: (DATA / filename).read_bytes() for filename in SOURCE_FILES}
+    for filename, data in files.items():
         s3.put_object(Bucket=BUCKET, Key=filename, Body=data)
         print(f"s3://{BUCKET}/{filename} ({len(data)} bytes)")
+    report = reconcile(Sources(s3))
+    report["payables_review"] = payables_review(report, files[INBOX_KEY])
+    published = publish_reconciliation(dataset_id(files), report)
+    print(f"Fechamento publicado: {published['processed_at']} · dataset {published['dataset']}")
 
 
 def main() -> None:

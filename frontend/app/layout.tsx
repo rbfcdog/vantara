@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Vantara | Operações",
-  description: "Investigue pendências nos exports de Protheus, Omie, banco e contas a pagar",
+  description: "Exceções de recebíveis e contas a pagar com evidências para revisão financeira",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

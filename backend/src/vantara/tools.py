@@ -8,18 +8,20 @@ MAX_OUTPUT_CHARS = 6000
 TOOLS = [
     {"type": "function", "name": "list_sources", "description": "Lista arquivos exportados no S3 simulado e colunas dos CSVs.",
      "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}, "strict": True},
-    {"type": "function", "name": "search_csv", "description": "Busca termo em linhas de um CSV exportado; devolve arquivo, linha e colunas originais (até 12 resultados).",
+    {"type": "function", "name": "search_csv", "description": "Busca LITERAL por termo exato (NF completa, nosso_numero/invoice_ref, CNPJ sem pontuação) em UM CSV; devolve arquivo, linha e colunas originais (até 12 resultados; matches/truncated indicam busca incompleta, não ausência).",
      "parameters": {"type": "object", "properties": {
          "source": {"type": "string", "enum": list(CSV_SOURCES)},
          "query": {"type": "string", "description": "Texto ou CNPJ sem pontuação para buscar."}},
          "required": ["source", "query"], "additionalProperties": False}, "strict": True},
-    {"type": "function", "name": "search_text", "description": "Busca na caixa de entrada exportada; devolve linhas vizinhas numeradas (até 6 ocorrências).",
+    {"type": "function", "name": "search_text", "description": "Busca literal na caixa de A PAGAR (04); devolve linhas vizinhas numeradas (até 6 ocorrências). Anexos citados nas mensagens não existem neste fluxo.",
      "parameters": {"type": "object", "properties": {"query": {"type": "string"}},
                     "required": ["query"], "additionalProperties": False}, "strict": True},
-    {"type": "function", "name": "list_reconciliation", "description": "Percorre títulos e créditos sem vínculo, inclusive candidatos NÃO confirmados. Paginar até total.",
+    {"type": "function", "name": "get_reconciliation_summary", "description": "Resumo determinístico de créditos, títulos, cobertura de fontes e possíveis débitos repetidos; não confirma baixas no ERP.",
+     "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}, "strict": True},
+    {"type": "function", "name": "list_reconciliation", "description": "Percorre títulos e créditos sem vínculo, inclusive candidatos NÃO confirmados. Páginas de 10; continue com offset até somar total antes de afirmar ausência.",
      "parameters": {"type": "object", "properties": {"offset": {"type": "integer", "minimum": 0}},
                     "required": ["offset"], "additionalProperties": False}, "strict": True},
-    {"type": "function", "name": "get_record", "description": "Detalha título ou lançamento bancário pela linha do relatório antes de concluir.",
+    {"type": "function", "name": "get_record", "description": "Detalha título ou lançamento pela linha do CSV (source protheus|omie|bank = 01|02|03; line >=2). Obrigatório antes de concluir sobre `0N:L`; {'error':'Registro não encontrado'} = linha citada não existe, não substitua por parecido.",
      "parameters": {"type": "object", "properties": {
          "source": {"type": "string", "enum": ["protheus", "omie", "bank"]},
          "line": {"type": "integer", "minimum": 2}},
@@ -36,6 +38,8 @@ def execute(sources: Sources, name: str, arguments: str, report=None) -> str:
             result = sources.search_csv(**args)
         elif name == "search_text" and isinstance(args, dict) and set(args) == {"query"}:
             result = sources.search_text(**args)
+        elif name == "get_reconciliation_summary" and args == {}:
+            result = (report if report is not None else reconcile(sources))["summary"]
         elif name == "list_reconciliation" and isinstance(args, dict) and set(args) == {"offset"} and type(args["offset"]) is int and args["offset"] >= 0:
             summary = overview(report if report is not None else reconcile(sources))
             items = summary["titles"] + summary["unlinked_bank"]

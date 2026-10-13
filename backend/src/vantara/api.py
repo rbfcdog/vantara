@@ -16,9 +16,13 @@ from openai import APIError, AuthenticationError
 from pydantic import BaseModel, Field
 
 from .agent import draft_request, run
+from .autonomous import run_autonomous
+from .demo import operations
+from .payables import payables_review
 from .reconcile import reconcile, title_case, worklist
+from .suggest import unlinked_suggestions
 from .sources import BUCKET, SOURCE_FILES, Sources
-from .workflow import dataset_id, list_cases, update_case
+from .workflow import dataset_id, latest_reconciliation, list_cases, publish_reconciliation, update_case
 
 
 app = FastAPI(title="Vantara analyst API")
@@ -65,14 +69,27 @@ def _sources():
 
 
 
-def _current_workflow():
+def _current_publication():
+    published = latest_reconciliation()
+    if published is not None:
+        return published
     source = _sources()
     files = {filename: source._read(filename) for filename in SOURCE_FILES}
     report = reconcile(UploadedSources(files))
+    report["payables_review"] = payables_review(report, files[SOURCE_FILES[-1]])
+    report["receivables_suggestions"] = unlinked_suggestions(report)
+    dataset = dataset_id(files)
+    report["autonomous_execution"] = run_autonomous(dataset, report, report["receivables_suggestions"])
+    return publish_reconciliation(dataset, report)
+
+
+def _current_workflow():
+    published = _current_publication()
+    report = published
     header, *rows = worklist(report)
     indices = {column: header.index(column) for column in ("origem", "linha")}
     identities = {(row[indices["origem"]], int(row[indices["linha"]])) for row in rows}
-    return dataset_id(files), identities, report
+    return published["dataset"], identities, report
 
 @app.exception_handler(RequestValidationError)
 async def invalid_request(request, exc):
@@ -173,11 +190,31 @@ def post_workflow_draft(payload: DraftRequest):
     return {"draft": draft_request(evidence)}
 
 
+@app.get("/api/reconciliation")
+def get_reconciliation():
+    return _current_publication()
+
+
+@app.get("/api/demo/operations")
+def get_demo_operations():
+    return operations(_current_publication())
+
+
+@app.post("/api/demo/operations/run")
+def run_demo_operations():
+    return operations(_current_publication(), run=True)
+
+
 @app.get("/api/worklist")
 def get_worklist():
-    header, *rows = worklist(reconcile(_sources()))
+    published = _current_publication()
+    header, *rows = worklist(published)
     return {"items": [dict(zip(header, row)) for row in rows],
-            "processed_at": datetime.now(timezone.utc).isoformat()}
+            "processed_at": published["processed_at"], "dataset": published["dataset"],
+            "summary": published["summary"], "investigations": published.get("investigations"),
+            "payables_review": published.get("payables_review"),
+            "receivables_suggestions": published.get("receivables_suggestions"),
+            "autonomous_execution": published.get("autonomous_execution")}
 
 @app.post("/api/exports")
 def upload_exports(payload: ExportRequest):
@@ -207,22 +244,29 @@ def upload_exports(payload: ExportRequest):
         if exc.response.get("Error", {}).get("Code") not in {"404", "NoSuchBucket"}:
             raise
         s3.create_bucket(Bucket=BUCKET)
+    # ponytail: quatro chaves fixas não são transacionais; uploads concorrentes pedem chaves imutáveis por dataset e ponteiro atômico.
     for filename in SOURCE_FILES:
         s3.put_object(Bucket=BUCKET, Key=filename, Body=files[filename])
-    return {"processed_at": datetime.now(timezone.utc).isoformat(), "items_count": items_count}
+    report["payables_review"] = payables_review(report, files[SOURCE_FILES[-1]])
+    report["receivables_suggestions"] = unlinked_suggestions(report)
+    dataset = dataset_id(files)
+    report["autonomous_execution"] = run_autonomous(dataset, report, report["receivables_suggestions"])
+    published = publish_reconciliation(dataset, report)
+    return {"processed_at": published["processed_at"], "dataset": published["dataset"],
+            "summary": published["summary"], "items_count": items_count}
 
 
 @app.get("/api/worklist.csv")
 def get_worklist_csv():
     output = StringIO(newline="")
-    csv.writer(output, delimiter=";", lineterminator="\n").writerows(worklist(reconcile(_sources())))
+    csv.writer(output, delimiter=";", lineterminator="\n").writerows(worklist(_current_publication()))
     return Response(content=output.getvalue(), media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": 'attachment; filename="vantara-worklist.csv"'})
 
 
 @app.get("/api/case")
 def get_case(source: Literal["protheus", "omie", "bank"], line: int = Query(ge=2)):
-    report = reconcile(_sources())
+    report = _current_publication()
     if source == "bank":
         bank = next((item for item in report["bank"] if item["line"] == line), None)
         if bank is None:
